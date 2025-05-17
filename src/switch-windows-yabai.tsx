@@ -1,4 +1,4 @@
-// Command.tsx
+// TypeScript
 import {
   Action,
   ActionPanel,
@@ -16,6 +16,12 @@ interface YabaiWindow {
   id: number;
   app: string;
   title: string;
+  space: number;
+}
+
+interface YabaiSpace {
+  index: number;
+  windows: any[];
 }
 
 const execFilePromise = promisify(execFile);
@@ -30,26 +36,26 @@ export default function Command() {
   const [searchText, setSearchText] = useState("");
   const [windows, setWindows] = useState<YabaiWindow[]>([]);
 
-  // Load usageTimes from local storage on mount
+  // Load previous usage times from local storage when the component mounts.
   useEffect(() => {
     (async () => {
       const storedTimes = await LocalStorage.getItem<string>("usageTimes");
       if (storedTimes) {
         try {
-          setUsageTimes(JSON.parse(storedTimes) as Record<string, number>);
+          setUsageTimes(JSON.parse(storedTimes));
         } catch {
-          // Parsing error; start fresh.
+          setUsageTimes({});
         }
       }
     })();
   }, []);
 
-  // Save usageTimes whenever they change
+  // Persist usage times in local storage when they change.
   useEffect(() => {
     LocalStorage.setItem("usageTimes", JSON.stringify(usageTimes));
   }, [usageTimes]);
 
-  // useExec to initially get Yabai windows
+  // Query windows using useExec.
   const { isLoading, data, error } = useExec<YabaiWindow[]>(
     YABAI,
     ["-m", "query", "--windows"],
@@ -69,7 +75,6 @@ export default function Command() {
     }
   );
 
-  // Update windows state when data is fetched.
   useEffect(() => {
     if (data !== undefined) {
       setWindows(data);
@@ -78,12 +83,12 @@ export default function Command() {
     }
   }, [data, isLoading, error]);
 
-  // Function to remove a window from the list after it's closed
+  // Function to remove a window from the local listing after it's closed.
   const removeWindow = useCallback((id: number) => {
     setWindows((prevWindows) => prevWindows.filter((w) => w.id !== id));
   }, []);
 
-  // Filter windows based on search text
+  // Filter windows based on the search text.
   const filteredWindows = useMemo(() => {
     if (!Array.isArray(windows)) return [];
     const lowerQuery = searchText.toLowerCase();
@@ -94,7 +99,7 @@ export default function Command() {
     );
   }, [windows, searchText]);
 
-  // Sort windows according to usageTimes
+  // Sort windows based on usage times.
   const sortedWindows = useMemo(() => {
     return [...filteredWindows].sort((a, b) => {
       const timeA = usageTimes[a.id] || 0;
@@ -121,12 +126,12 @@ export default function Command() {
               <WindowActions
                 windowId={win.id}
                 windowApp={win.app}
-                onFocused={(id) => {
+                onFocused={(id) =>
                   setUsageTimes((prev) => ({
                     ...prev,
                     [id]: Date.now(),
-                  }));
-                }}
+                  }))
+                }
                 onRemove={removeWindow}
               />
             }
@@ -162,68 +167,198 @@ function WindowActions({
   onFocused: (id: number) => void;
   onRemove: (id: number) => void;
 }) {
+  // Focus a window.
   const handleFocusWindow = async () => {
     await showToast({ style: Toast.Style.Animated, title: "Focusing Window..." });
     try {
       const { stdout, stderr } = await execFilePromise(
         YABAI,
-        ["-m", "window", "--focus", windowId.toString()],
+        ["-m", "window", windowId.toString(), "--focus"],
         { env: ENV }
       );
-      if (stderr) {
+      if (stderr?.trim()) {
         await showToast({
           style: Toast.Style.Failure,
-          title: "Yabai Error",
+          title: "Yabai Error - Focus Window",
           message: stderr.trim(),
         });
       } else {
-        console.log("Yabai output:", stdout);
         onFocused(windowId);
         await showToast({
           style: Toast.Style.Success,
           title: "Window Focused",
-          message: `Window ${windowApp} (yabai id: ${windowId})`,
+          message: `Window ${windowApp} focused`,
         });
       }
     } catch (error: any) {
       await showToast({
         style: Toast.Style.Failure,
         title: "Failed to Focus Window",
-        message: error.message || "Unknown error",
+        message: error.message || "Unknown error while focusing window",
       });
     }
   };
 
+  // Close a window and remove it from the list.
   const handleCloseWindow = async () => {
     await showToast({ style: Toast.Style.Animated, title: "Closing Window..." });
     try {
       const { stdout, stderr } = await execFilePromise(
         YABAI,
-        ["-m", "window", "--close", windowId.toString()],
+        ["-m", "window", windowId.toString(), "--close"],
         { env: ENV }
       );
-
-      if (stderr) {
+      if (stderr?.trim()) {
         await showToast({
           style: Toast.Style.Failure,
-          title: "Yabai Error",
+          title: "Yabai Error - Close Window",
           message: stderr.trim(),
         });
       } else {
         await showToast({
           style: Toast.Style.Success,
           title: "Window Closed",
-          message: `Window ${windowApp} (yabai id: ${windowId}) closed`,
+          message: `Window ${windowApp} closed`,
         });
-        // Remove the closed window from the list
         onRemove(windowId);
       }
-      console.log("Yabai output:", stdout);
     } catch (error: any) {
       await showToast({
         style: Toast.Style.Failure,
         title: "Failed to Close Window",
-        message: error.message || "Unknown error",
+        message: error.message || "Unknown error while closing window",
+      });
+    }
+  };
+
+  // Aggregate all windows with the same app name into an empty or newly created space.
+  const handleAggregateToSpace = async () => {
+    await showToast({
+      style: Toast.Style.Animated,
+      title: "Aggregating Windows...",
+    });
+    try {
+      // Step 1: Query the current window for its space.
+      const currentWinResult = await execFilePromise(
+        YABAI,
+        ["-m", "query", "--windows", "--window", windowId.toString()],
+        { env: ENV }
+      );
+      const currentWin: YabaiWindow = JSON.parse(currentWinResult.stdout);
+      const currentSpace = currentWin.space;
+      console.log("Current space:", currentSpace);
+
+      // Step 2: Query all windows and count those in the current space.
+      const allWinsResult = await execFilePromise(
+        YABAI,
+        ["-m", "query", "--windows"],
+        { env: ENV }
+      );
+      const allWindows: YabaiWindow[] = JSON.parse(allWinsResult.stdout);
+      const windowsInCurrentSpace = allWindows.filter((w) => w.space === currentSpace);
+      console.log("Windows in current space:", windowsInCurrentSpace.length);
+
+      if (windowsInCurrentSpace.length < 2) {
+        await showToast({
+          style: Toast.Style.Normal,
+          title: "Nothing to Aggregate",
+          message: "The current space contains only one window.",
+        });
+        return;
+      }
+
+      // Step 3: Find an empty space.
+      const spacesResult = await execFilePromise(
+        YABAI,
+        ["-m", "query", "--spaces"],
+        { env: ENV }
+      );
+      const spaces: YabaiSpace[] = JSON.parse(spacesResult.stdout);
+      let targetSpace = spaces.find((s) => Array.isArray(s.windows) && s.windows.length === 0);
+
+      // Step 4: Create a new space if no empty one is found.
+      if (!targetSpace) {
+        const createResult = await execFilePromise(
+          YABAI,
+          ["-m", "space", "--create"],
+          { env: ENV }
+        );
+        console.log("Space creation output:", createResult.stdout);
+        const spacesResultAfter = await execFilePromise(
+          YABAI,
+          ["-m", "query", "--spaces"],
+          { env: ENV }
+        );
+        const updatedSpaces: YabaiSpace[] = JSON.parse(spacesResultAfter.stdout);
+        targetSpace = updatedSpaces.find((s) => Array.isArray(s.windows) && s.windows.length === 0);
+      }
+
+      if (!targetSpace) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Aggregation Failed",
+          message: "Could not find or create an empty space.",
+        });
+        return;
+      }
+
+      const targetSpaceId = targetSpace.index;
+      console.log("Target space id:", targetSpaceId);
+
+      // Step 5: Filter windows of the same app (case‑insensitive).
+      const matchingWindows = allWindows.filter(
+        (w) => w.app.toLowerCase() === windowApp.toLowerCase()
+      );
+      console.log(
+        `Moving ${matchingWindows.length} windows for app '${windowApp}' to space ${targetSpaceId}.`
+      );
+
+      // Step 6: Move each matching window using the correct order of parameters.
+      for (const win of matchingWindows) {
+        try {
+          const moveResult = await execFilePromise(
+            YABAI,
+            ["-m", "window", win.id.toString(), "--space", targetSpaceId.toString()],
+            { env: ENV }
+          );
+          if (moveResult.stderr?.trim()) {
+            console.error(`Error moving window ${win.id}: ${moveResult.stderr.trim()}`);
+          } else {
+            console.log(`Moved window ${win.id} to space ${targetSpaceId}.`);
+          }
+        } catch (innerError: any) {
+          console.error(`Exception while moving window ${win.id}: ${innerError.message}`);
+        }
+      }
+
+      // Step 7: Focus the target space.
+      await execFilePromise(
+        YABAI,
+        ["-m", "space", "--focus", targetSpaceId.toString()],
+        { env: ENV }
+      );
+
+      // Step 8: Focus one of the moved windows (here, the first one in the matching list).
+      if (matchingWindows.length > 0) {
+        const focusWindowId = matchingWindows[0].id;
+        await execFilePromise(
+          YABAI,
+          ["-m", "window", focusWindowId.toString(), "--focus"],
+          { env: ENV }
+        );
+      }
+
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Aggregation Complete",
+        message: `All "${windowApp}" windows have been moved to space ${targetSpaceId} and one has been focused.`,
+      });
+    } catch (error: any) {
+      console.error("Aggregation failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Aggregation Failed",
+        message: error.message || "An unknown error occurred during aggregation.",
       });
     }
   };
@@ -231,6 +366,7 @@ function WindowActions({
   return (
     <ActionPanel>
       <Action title="Switch to Window" onAction={handleFocusWindow} />
+      <Action title="Aggregate to Space" onAction={handleAggregateToSpace} />
       <Action title="Close Window" onAction={handleCloseWindow} />
     </ActionPanel>
   );
