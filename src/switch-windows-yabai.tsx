@@ -175,9 +175,37 @@ function WindowActions({
     }
   };
 
+  const handleCloseWindow = async () => {
+    await showToast({ style: Toast.Style.Animated, title: "Closing Window..." });
+    try {
+      const { stdout, stderr } = await execFilePromise(YABAI, ["-m", "window", "--close", windowId.toString()], {
+        env: ENV,
+      });
+
+      if (stderr) {
+        await showToast({ style: Toast.Style.Failure, title: "Yabai Error", message: stderr.trim() });
+      } else {
+        await showToast({
+          style: Toast.Style.Success,
+          title: "Window Closed",
+          message: `Window ${windowApp} (yabai id: ${windowId}) closed`,
+        });
+      }
+      console.log("Yabai output: ", stdout);
+    } catch (error: any) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Failed to Close Window",
+        message: error.message || "Unknown error",
+      });
+    }
+  };
+
+
   return (
     <ActionPanel>
       <Action title="Switch to Window" onAction={handleFocusWindow} />
+      <Action title="Close Window" onAction={handleCloseWindow} />
     </ActionPanel>
   );
 }
