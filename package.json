@@ -13,7 +13,7 @@
     {
       "name": "switch-windows-yabai",
       "title": "Switch Windows (yabai)",
-      "description": "",
+      "description": "Switch Windows extension similar to Native Raycast one but using Yabai. More actions to come",
       "mode": "view"
     }
   ],
