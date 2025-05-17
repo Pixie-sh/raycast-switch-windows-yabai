@@ -1,6 +1,14 @@
-import { Action, ActionPanel, List, LocalStorage, showToast, Toast } from "@raycast/api";
+// Command.tsx
+import {
+  Action,
+  ActionPanel,
+  List,
+  LocalStorage,
+  showToast,
+  Toast,
+} from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 
@@ -22,7 +30,7 @@ export default function Command() {
   const [searchText, setSearchText] = useState("");
   const [windows, setWindows] = useState<YabaiWindow[]>([]);
 
-  // Load existing usage data from local storage on mount
+  // Load usageTimes from local storage on mount
   useEffect(() => {
     (async () => {
       const storedTimes = await LocalStorage.getItem<string>("usageTimes");
@@ -30,7 +38,7 @@ export default function Command() {
         try {
           setUsageTimes(JSON.parse(storedTimes) as Record<string, number>);
         } catch {
-          // If parsing fails, ignore and start fresh
+          // Parsing error; start fresh.
         }
       }
     })();
@@ -41,16 +49,14 @@ export default function Command() {
     LocalStorage.setItem("usageTimes", JSON.stringify(usageTimes));
   }, [usageTimes]);
 
-  // useExec to get your Yabai windows
+  // useExec to initially get Yabai windows
   const { isLoading, data, error } = useExec<YabaiWindow[]>(
     YABAI,
     ["-m", "query", "--windows"],
     {
       env: ENV,
       parseOutput: ({ stdout }) => {
-        if (!stdout) {
-          return [];
-        }
+        if (!stdout) return [];
         try {
           const parsed = JSON.parse(stdout);
           return Array.isArray(parsed) ? parsed : [];
@@ -63,6 +69,7 @@ export default function Command() {
     }
   );
 
+  // Update windows state when data is fetched.
   useEffect(() => {
     if (data !== undefined) {
       setWindows(data);
@@ -71,11 +78,15 @@ export default function Command() {
     }
   }, [data, isLoading, error]);
 
-  // Filter by search text
+  // Function to remove a window from the list after it's closed
+  const removeWindow = useCallback((id: number) => {
+    setWindows((prevWindows) => prevWindows.filter((w) => w.id !== id));
+  }, []);
+
+  // Filter windows based on search text
   const filteredWindows = useMemo(() => {
     if (!Array.isArray(windows)) return [];
     const lowerQuery = searchText.toLowerCase();
-
     return windows.filter(
       (win) =>
         win.title.toLowerCase().includes(lowerQuery) ||
@@ -83,8 +94,7 @@ export default function Command() {
     );
   }, [windows, searchText]);
 
-  // Sort by most-recently used:
-  // usageTimes[win.id] is the timestamp of last focus. More recent => higher in the list
+  // Sort windows according to usageTimes
   const sortedWindows = useMemo(() => {
     return [...filteredWindows].sort((a, b) => {
       const timeA = usageTimes[a.id] || 0;
@@ -107,13 +117,19 @@ export default function Command() {
             icon={getAppIcon(win.app)}
             title={win.app}
             subtitle={win.title}
-            actions={<WindowActions windowId={win.id} windowApp={win.app} onFocused={(id) => {
-              // Record the current time for the recently focused window
-              setUsageTimes((prev) => ({
-                ...prev,
-                [id]: Date.now(),
-              }));
-            }} />}
+            actions={
+              <WindowActions
+                windowId={win.id}
+                windowApp={win.app}
+                onFocused={(id) => {
+                  setUsageTimes((prev) => ({
+                    ...prev,
+                    [id]: Date.now(),
+                  }));
+                }}
+                onRemove={removeWindow}
+              />
+            }
           />
         ))}
       </List.Section>
@@ -139,18 +155,21 @@ function WindowActions({
                          windowId,
                          windowApp,
                          onFocused,
+                         onRemove,
                        }: {
   windowId: number;
   windowApp: string;
   onFocused: (id: number) => void;
+  onRemove: (id: number) => void;
 }) {
   const handleFocusWindow = async () => {
     await showToast({ style: Toast.Style.Animated, title: "Focusing Window..." });
     try {
-      const { stdout, stderr } = await execFilePromise(YABAI, ["-m", "window", "--focus", windowId.toString()], {
-        env: ENV,
-      });
-
+      const { stdout, stderr } = await execFilePromise(
+        YABAI,
+        ["-m", "window", "--focus", windowId.toString()],
+        { env: ENV }
+      );
       if (stderr) {
         await showToast({
           style: Toast.Style.Failure,
@@ -158,12 +177,12 @@ function WindowActions({
           message: stderr.trim(),
         });
       } else {
-        console.log("Yabai output: ", stdout);
+        console.log("Yabai output:", stdout);
         onFocused(windowId);
         await showToast({
           style: Toast.Style.Success,
           title: "Window Focused",
-          message: `Window ${windowApp} (yabai id:${windowId})`,
+          message: `Window ${windowApp} (yabai id: ${windowId})`,
         });
       }
     } catch (error: any) {
@@ -178,20 +197,28 @@ function WindowActions({
   const handleCloseWindow = async () => {
     await showToast({ style: Toast.Style.Animated, title: "Closing Window..." });
     try {
-      const { stdout, stderr } = await execFilePromise(YABAI, ["-m", "window", "--close", windowId.toString()], {
-        env: ENV,
-      });
+      const { stdout, stderr } = await execFilePromise(
+        YABAI,
+        ["-m", "window", "--close", windowId.toString()],
+        { env: ENV }
+      );
 
       if (stderr) {
-        await showToast({ style: Toast.Style.Failure, title: "Yabai Error", message: stderr.trim() });
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Yabai Error",
+          message: stderr.trim(),
+        });
       } else {
         await showToast({
           style: Toast.Style.Success,
           title: "Window Closed",
           message: `Window ${windowApp} (yabai id: ${windowId}) closed`,
         });
+        // Remove the closed window from the list
+        onRemove(windowId);
       }
-      console.log("Yabai output: ", stdout);
+      console.log("Yabai output:", stdout);
     } catch (error: any) {
       await showToast({
         style: Toast.Style.Failure,
@@ -200,7 +227,6 @@ function WindowActions({
       });
     }
   };
-
 
   return (
     <ActionPanel>
