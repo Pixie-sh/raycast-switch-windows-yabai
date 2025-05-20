@@ -24,14 +24,14 @@ export const handleFocusWindow = (windowId: number, windowApp: string, onFocused
         onFocused(windowId);
         await showToast({
           style: Toast.Style.Success,
-          title: "Window Focused",
-          message: `Window ${windowApp} focused`,
+          title: `${windowApp} focused`,
+          message: `Window ${windowApp} (${windowId}) focused`,
         });
       }
     } catch (error: unknown) {
       await showToast({
         style: Toast.Style.Failure,
-        title: "Failed to Focus Window",
+        title: `Failed Window ${windowApp} (${windowId}) focus`,
         message: error.message || "Unknown error while focusing window",
       });
     }
