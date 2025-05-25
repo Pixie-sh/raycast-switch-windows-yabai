@@ -10,6 +10,7 @@ import {
   handleDisperseWindowsBySpace,
   handleFocusWindow
 } from "./handlers";
+import {DisplayActions} from "./display-actions-yabai";
 
 export default function Command() {
   const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});
@@ -158,11 +159,7 @@ function WindowActions({
         onAction={handleCloseEmptySpaces(windowId, onRemove)}
         shortcut={{ modifiers: ["cmd", "shift"], key: "q" }}
       />
-    <Action
-        title="Disperse Windows 1st Screen"
-        onAction={handleDisperseWindowsBySpace()}
-        shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
-      />
+      <DisplayActions />
     </ActionPanel>
   );
 }
