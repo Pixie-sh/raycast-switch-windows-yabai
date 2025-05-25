@@ -251,7 +251,7 @@ export const handleDisperseWindowsBySpace = (screenIdx: string) => {
       try {
         // Added: Focus on the first space to ensure a target for focus exists.
         await execFilePromise(YABAI, ["-m", "space", "--focus", "1"], { env: ENV });
-      } catch (error) { /*ignore, error will be thrown*/}
+      } catch { /*ignore, error will be thrown*/}
 
       await showToast({
         style: Toast.Style.Success,

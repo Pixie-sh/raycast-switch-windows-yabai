@@ -7,7 +7,6 @@ import {
   handleAggregateToSpace,
   handleCloseEmptySpaces,
   handleCloseWindow,
-  handleDisperseWindowsBySpace,
   handleFocusWindow
 } from "./handlers";
 import {DisplayActions} from "./display-actions-yabai";
