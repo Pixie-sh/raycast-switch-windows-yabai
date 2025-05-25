@@ -3,7 +3,13 @@ import { Action, ActionPanel, List, LocalStorage } from "@raycast/api";
 import { useExec } from "@raycast/utils";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { ENV, YABAI, YabaiWindow } from "./models";
-import { handleAggregateToSpace, handleCloseEmptySpaces, handleCloseWindow, handleFocusWindow } from "./handlers";
+import {
+  handleAggregateToSpace,
+  handleCloseEmptySpaces,
+  handleCloseWindow,
+  handleDisperseWindowsBySpace,
+  handleFocusWindow
+} from "./handlers";
 
 export default function Command() {
   const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});
@@ -151,6 +157,11 @@ function WindowActions({
         title="Close Empty Spaces"
         onAction={handleCloseEmptySpaces(windowId, onRemove)}
         shortcut={{ modifiers: ["cmd", "shift"], key: "q" }}
+      />
+    <Action
+        title="Disperse Windows 1st Screen"
+        onAction={handleDisperseWindowsBySpace()}
+        shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
       />
     </ActionPanel>
   );

@@ -206,3 +206,62 @@ export const handleCloseEmptySpaces = (windowId: number, onRemove: (id: number) 
     }
   };
 };
+
+export const handleDisperseWindowsBySpace = () => {
+  return async () => {
+    await showToast({ style: Toast.Style.Animated, title: "Dispersing Windows Across Spaces..." });
+    try {
+      // Step 1: Query all windows
+      const windowsResult = await execFilePromise(YABAI, ["-m", "query", "--windows"], { env: ENV });
+      const windows: YabaiWindow[] = JSON.parse(windowsResult.stdout);
+
+      // Step 2: Query all spaces
+      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
+      let spaces: YabaiSpace[] = JSON.parse(spacesResult.stdout);
+
+      // Step 3: Create new spaces if needed
+      const spacesToCreate = windows.length - spaces.length;
+      if (spacesToCreate > 0) {
+        for (let i = 0; i < spacesToCreate; i++) {
+          await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
+        }
+
+        // Re-query spaces after creating new ones
+        const updatedSpacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
+        spaces = JSON.parse(updatedSpacesResult.stdout);
+      }
+
+      // Step 4: Disperse windows across spaces
+      for (let i = 0; i < windows.length; i++) {
+        const window = windows[i];
+        const space = spaces[i];
+
+        // Move the window to the corresponding space
+        const moveResult = await execFilePromise(
+          YABAI,
+          ["-m", "window", window.id.toString(), "--space", space.index.toString()],
+          { env: ENV }
+        );
+
+        if (moveResult.stderr?.trim()) {
+          console.error(`Error moving window ${window.id}: ${moveResult.stderr.trim()}`);
+        } else {
+          console.log(`Moved window ${window.id} to space ${space.index}.`);
+        }
+      }
+
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Dispersal Complete",
+        message: "Windows have been evenly distributed across spaces.",
+      });
+    } catch (error: unknown) {
+      console.error("Dispersal failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Dispersal Failed",
+        message: error.message || "An unknown error occurred during dispersal.",
+      });
+    }
+  };
+};
