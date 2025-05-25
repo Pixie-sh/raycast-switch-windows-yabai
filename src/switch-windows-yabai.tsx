@@ -3,13 +3,8 @@ import { Action, ActionPanel, List, LocalStorage } from "@raycast/api";
 import { useExec } from "@raycast/utils";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { ENV, YABAI, YabaiWindow } from "./models";
-import {
-  handleAggregateToSpace,
-  handleCloseEmptySpaces,
-  handleCloseWindow,
-  handleFocusWindow
-} from "./handlers";
-import {DisplayActions} from "./display-actions-yabai";
+import { handleAggregateToSpace, handleCloseEmptySpaces, handleCloseWindow, handleFocusWindow } from "./handlers";
+import { DisplayActions } from "./display-actions-yabai";
 
 export default function Command() {
   const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});

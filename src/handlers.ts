@@ -211,11 +211,15 @@ export const handleDisperseWindowsBySpace = (screenIdx: string) => {
     await showToast({ style: Toast.Style.Animated, title: "Dispersing Windows Across Spaces..." });
     try {
       // Step 1: Query all windows on the given display
-      const windowsResult = await execFilePromise(YABAI, ["-m", "query", "--windows", "--display", screenIdx], { env: ENV });
+      const windowsResult = await execFilePromise(YABAI, ["-m", "query", "--windows", "--display", screenIdx], {
+        env: ENV,
+      });
       const windows: YabaiWindow[] = JSON.parse(windowsResult.stdout);
 
       // Step 2: Query all spaces on the given display
-      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--display", screenIdx], { env: ENV });
+      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--display", screenIdx], {
+        env: ENV,
+      });
       let spaces: YabaiSpace[] = JSON.parse(spacesResult.stdout);
 
       // Step 3: Create new spaces if needed so that each window has a space
@@ -236,9 +240,9 @@ export const handleDisperseWindowsBySpace = (screenIdx: string) => {
 
         // Move the window into the corresponding space
         const moveResult = await execFilePromise(
-            YABAI,
-            ["-m", "window", window.id.toString(), "--space", space.index.toString()],
-            { env: ENV }
+          YABAI,
+          ["-m", "window", window.id.toString(), "--space", space.index.toString()],
+          { env: ENV },
         );
 
         if (moveResult.stderr?.trim()) {
@@ -251,7 +255,9 @@ export const handleDisperseWindowsBySpace = (screenIdx: string) => {
       try {
         // Added: Focus on the first space to ensure a target for focus exists.
         await execFilePromise(YABAI, ["-m", "space", "--focus", "1"], { env: ENV });
-      } catch { /*ignore, error will be thrown*/}
+      } catch {
+        /*ignore, error will be thrown*/
+      }
 
       await showToast({
         style: Toast.Style.Success,
