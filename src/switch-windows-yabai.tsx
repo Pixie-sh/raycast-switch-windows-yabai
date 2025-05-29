@@ -1,16 +1,38 @@
 // TypeScript
 import { Action, ActionPanel, List, LocalStorage } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { ENV, YABAI, YabaiWindow, SortMethod } from "./models";
 import { handleAggregateToSpace, handleCloseEmptySpaces, handleCloseWindow, handleFocusWindow } from "./handlers";
 import { DisplayActions } from "./display-actions-yabai";
+import Fuse from "fuse.js";
+
+// Custom hook for debounced search
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+  useEffect(() => {
+    // Set debouncedValue to value after the specified delay
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    // Cancel the timeout if value changes or component unmounts
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
 
 export default function Command() {
   const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});
-  const [searchText, setSearchText] = useState("");
+  const [inputText, setInputText] = useState("");
+  const searchText = useDebounce(inputText, 150); // 150ms debounce delay
   const [windows, setWindows] = useState<YabaiWindow[]>([]);
   const [sortMethod, setSortMethod] = useState<SortMethod>(SortMethod.RECENTLY_USED);
+  const [isSearching, setIsSearching] = useState(false);
 
   // Load previous usage times and sort method from local storage when the component mounts.
   useEffect(() => {
@@ -74,14 +96,39 @@ export default function Command() {
     setWindows((prevWindows) => prevWindows.filter((w) => w.id !== id));
   }, []);
 
-  // Filter windows based on the search text.
+  // Create a Fuse instance for fuzzy searching
+  const fuse = useMemo(() => {
+    if (!Array.isArray(windows) || windows.length === 0) return null;
+    return new Fuse(windows, {
+      keys: ['app', 'title'],
+      includeScore: true,
+      threshold: 0.4, // Lower threshold means more strict matching
+      ignoreLocation: true, // Search the entire string, not just from the beginning
+      useExtendedSearch: true, // Enable extended search for more powerful queries
+    });
+  }, [windows]);
+
+  // Set searching state when input text changes
+  useEffect(() => {
+    if (inputText.trim() && inputText !== searchText) {
+      setIsSearching(true);
+    } else {
+      setIsSearching(false);
+    }
+  }, [inputText, searchText]);
+
+  // Filter windows based on the search text using fuzzy search
   const filteredWindows = useMemo(() => {
     if (!Array.isArray(windows)) return [];
-    const lowerQuery = searchText.toLowerCase();
-    return windows.filter(
-      (win) => win.title.toLowerCase().includes(lowerQuery) || win.app.toLowerCase().includes(lowerQuery),
-    );
-  }, [windows, searchText]);
+    if (!searchText.trim()) return windows; // Return all windows if search text is empty
+
+    if (!fuse) return [];
+
+    // Use Fuse.js for fuzzy searching
+    const results = fuse.search(searchText);
+    setIsSearching(false); // Search is complete
+    return results.map(result => result.item);
+  }, [windows, searchText, fuse]);
 
   // Sort windows based on selected sort method.
   const sortedWindows = useMemo(() => {
@@ -129,7 +176,13 @@ export default function Command() {
   }, [filteredWindows, usageTimes, sortMethod]);
 
   return (
-    <List isLoading={isLoading} onSearchTextChange={setSearchText} searchBarPlaceholder="Search windows..." throttle>
+    <List 
+      isLoading={isLoading || isSearching} 
+      onSearchTextChange={setInputText} 
+      searchBarPlaceholder="Search windows..." 
+      filtering={false} // Disable built-in filtering since we're using Fuse.js
+      throttle={false} // Disable throttling for more responsive search
+    >
       <List.Section title="Windows" subtitle={sortedWindows.length.toString()}>
         {sortedWindows.map((win) => (
           <List.Item
