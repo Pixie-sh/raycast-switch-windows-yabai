@@ -1,7 +1,7 @@
 // TypeScript
 import { Action, ActionPanel, List, LocalStorage } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { ENV, YABAI, YabaiWindow, SortMethod } from "./models";
 import { handleAggregateToSpace, handleCloseEmptySpaces, handleCloseWindow, handleFocusWindow } from "./handlers";
 import { DisplayActions } from "./display-actions-yabai";
@@ -100,7 +100,7 @@ export default function Command() {
   const fuse = useMemo(() => {
     if (!Array.isArray(windows) || windows.length === 0) return null;
     return new Fuse(windows, {
-      keys: ['app', 'title'],
+      keys: ["app", "title"],
       includeScore: true,
       threshold: 0.4, // Lower threshold means more strict matching
       ignoreLocation: true, // Search the entire string, not just from the beginning
@@ -127,7 +127,7 @@ export default function Command() {
     // Use Fuse.js for fuzzy searching
     const results = fuse.search(searchText);
     setIsSearching(false); // Search is complete
-    return results.map(result => result.item);
+    return results.map((result) => result.item);
   }, [windows, searchText, fuse]);
 
   // Sort windows based on selected sort method.
@@ -176,10 +176,10 @@ export default function Command() {
   }, [filteredWindows, usageTimes, sortMethod]);
 
   return (
-    <List 
-      isLoading={isLoading || isSearching} 
-      onSearchTextChange={setInputText} 
-      searchBarPlaceholder="Search windows..." 
+    <List
+      isLoading={isLoading || isSearching}
+      onSearchTextChange={setInputText}
+      searchBarPlaceholder="Search windows..."
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
     >
@@ -282,8 +282,6 @@ function WindowActions({
   );
 }
 
-
-
 function getAppIcon(window: YabaiWindow) {
   const appName = window.app;
 
@@ -301,7 +299,7 @@ function getAppIcon(window: YabaiWindow) {
     `/Applications/${appName}.app`,
     `~/Applications/${appName}.app`,
     `/System/Applications/${appName}.app`,
-    `/System/Library/CoreServices/${appName}.app`
+    `/System/Library/CoreServices/${appName}.app`,
   ];
 
   // Special cases for common apps
@@ -311,20 +309,20 @@ function getAppIcon(window: YabaiWindow) {
 
   // Special cases for JetBrains IDEs
   const jetBrainsMap = {
-    "WebStorm": [
+    WebStorm: [
       "/Applications/WebStorm.app",
-      "~/Library/Application Support/JetBrains/Toolbox/apps/WebStorm/ch-0/*/WebStorm.app"
+      "~/Library/Application Support/JetBrains/Toolbox/apps/WebStorm/ch-0/*/WebStorm.app",
     ],
     "IntelliJ IDEA": [
       "/Applications/IntelliJ IDEA.app",
       "/Applications/IntelliJ IDEA CE.app",
-      "~/Library/Application Support/JetBrains/Toolbox/apps/IDEA-U/ch-0/*/IntelliJ IDEA.app"
+      "~/Library/Application Support/JetBrains/Toolbox/apps/IDEA-U/ch-0/*/IntelliJ IDEA.app",
     ],
-    "PyCharm": [
+    PyCharm: [
       "/Applications/PyCharm.app",
       "/Applications/PyCharm CE.app",
-      "~/Library/Application Support/JetBrains/Toolbox/apps/PyCharm-P/ch-0/*/PyCharm.app"
-    ]
+      "~/Library/Application Support/JetBrains/Toolbox/apps/PyCharm-P/ch-0/*/PyCharm.app",
+    ],
   };
 
   // Check if it's a JetBrains IDE
@@ -348,15 +346,27 @@ function getAppIcon(window: YabaiWindow) {
     genericIcon = { source: "globe" };
   } else if (appName.toLowerCase().includes("mail") || appName.toLowerCase().includes("outlook")) {
     genericIcon = { source: "envelope" };
-  } else if (appName.toLowerCase().includes("slack") || appName.toLowerCase().includes("whatsapp") ||
-      appName.toLowerCase().includes("messages") || appName.toLowerCase().includes("telegram")) {
+  } else if (
+    appName.toLowerCase().includes("slack") ||
+    appName.toLowerCase().includes("whatsapp") ||
+    appName.toLowerCase().includes("messages") ||
+    appName.toLowerCase().includes("telegram")
+  ) {
     genericIcon = { source: "message" };
-  } else if (appName.toLowerCase().includes("notes") || appName.toLowerCase().includes("text") ||
-      appName.toLowerCase().includes("word") || appName.toLowerCase().includes("pages")) {
+  } else if (
+    appName.toLowerCase().includes("notes") ||
+    appName.toLowerCase().includes("text") ||
+    appName.toLowerCase().includes("word") ||
+    appName.toLowerCase().includes("pages")
+  ) {
     genericIcon = { source: "document" };
-  } else if (appName.toLowerCase().includes("code") || appName.toLowerCase().includes("studio") ||
-      appName.toLowerCase().includes("webstorm") || appName.toLowerCase().includes("intellij") ||
-      appName.toLowerCase().includes("pycharm")) {
+  } else if (
+    appName.toLowerCase().includes("code") ||
+    appName.toLowerCase().includes("studio") ||
+    appName.toLowerCase().includes("webstorm") ||
+    appName.toLowerCase().includes("intellij") ||
+    appName.toLowerCase().includes("pycharm")
+  ) {
     genericIcon = { source: "terminal" };
   }
 
@@ -367,7 +377,7 @@ function getAppIcon(window: YabaiWindow) {
   for (let i = possiblePaths.length - 1; i >= 0; i--) {
     iconConfig = {
       fileIcon: possiblePaths[i],
-      fallback: iconConfig
+      fallback: iconConfig,
     };
   }
 
