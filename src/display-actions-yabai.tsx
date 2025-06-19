@@ -1,8 +1,8 @@
 /**
  * Raycast Yabai Extension
- * 
+ *
  * This extension provides a set of actions for managing windows using yabai window manager.
- * 
+ *
  * Main Features:
  * 1. List and search all windows and applications
  * 2. Switch to a specific window
@@ -10,22 +10,22 @@
  * 4. Close windows and empty spaces
  * 5. Disperse windows across spaces on a display
  * 6. Move a specific window to another display
- * 
+ *
  * The extension uses yabai commands to manage windows and spaces. It provides a user-friendly
  * interface for interacting with yabai through Raycast.
- * 
+ *
  * Usage:
  * - Use the search bar to find windows or applications
  * - Select a window to see available actions
  * - Use keyboard shortcuts for quick access to actions
- * 
+ *
  * Display Actions:
  * - "Disperse Windows for Display #X": Distributes windows across spaces on the selected display
  * - "Move to Display #X": Moves the selected window to the specified display
  */
 
 import React from "react";
-import { Action, ActionPanel } from "@raycast/api";
+import { Action } from "@raycast/api";
 import { useExec } from "@raycast/utils";
 import { handleDisperseWindowsBySpace, handleMoveWindowToDisplay } from "./handlers";
 import { ENV, YABAI } from "./models";
@@ -50,9 +50,12 @@ export function DisplayActions() {
     parseOutput: ({ stdout }) => {
       if (!stdout) return [];
       try {
-        const parsed = JSON.parse(stdout);
+        // Ensure stdout is a string before parsing
+        const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+        const parsed = JSON.parse(stdoutStr);
         return Array.isArray(parsed) ? parsed : [];
-      } catch {
+      } catch (parseError) {
+        console.error("Error parsing displays data in DisplayActions:", parseError);
         return [];
       }
     },
@@ -91,9 +94,12 @@ export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowTo
     parseOutput: ({ stdout }) => {
       if (!stdout) return [];
       try {
-        const parsed = JSON.parse(stdout);
+        // Ensure stdout is a string before parsing
+        const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+        const parsed = JSON.parse(stdoutStr);
         return Array.isArray(parsed) ? parsed : [];
-      } catch {
+      } catch (parseError) {
+        console.error("Error parsing displays data in MoveWindowToDisplayActions:", parseError);
         return [];
       }
     },
@@ -105,7 +111,7 @@ export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowTo
   if (!displays || displays.length <= 1) return null; // No need to show if there's only one display
 
   return (
-    <ActionPanel.Section title="Move to Display">
+    <>
       {displays?.map((display) => (
         <Action
           key={display.id}
@@ -114,6 +120,6 @@ export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowTo
           shortcut={{ modifiers: ["cmd", "opt"], key: display.index.toString() }}
         />
       ))}
-    </ActionPanel.Section>
+    </>
   );
 }
