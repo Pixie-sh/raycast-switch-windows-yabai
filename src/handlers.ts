@@ -206,6 +206,47 @@ export const handleCloseEmptySpaces = (windowId: number, onRemove: (id: number) 
     }
   };
 };
+export const handleMoveWindowToDisplay = (windowId: number, windowApp: string, displayIdx: string) => {
+  return async () => {
+    await showToast({ style: Toast.Style.Animated, title: `Moving Window to Display #${displayIdx}...` });
+    try {
+      // Move the window to the specified display
+      const { stderr } = await execFilePromise(
+        YABAI,
+        ["-m", "window", windowId.toString(), "--display", displayIdx],
+        { env: ENV },
+      );
+
+      if (stderr?.trim()) {
+        console.error(`Error moving window ${windowId}: ${stderr.trim()}`);
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Yabai Error - Move Window",
+          message: stderr.trim(),
+        });
+      } else {
+        console.log(`Moved window ${windowId} to display ${displayIdx}.`);
+
+        // Focus the window after moving it
+        await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--focus"], { env: ENV });
+
+        await showToast({
+          style: Toast.Style.Success,
+          title: `Window Moved`,
+          message: `${windowApp} has been moved to display #${displayIdx} and focused.`,
+        });
+      }
+    } catch (error: unknown) {
+      console.error("Move window failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Move Window Failed",
+        message: error.message || "An unknown error occurred while moving the window.",
+      });
+    }
+  };
+};
+
 export const handleDisperseWindowsBySpace = (screenIdx: string) => {
   return async () => {
     await showToast({ style: Toast.Style.Animated, title: "Dispersing Windows Across Spaces..." });

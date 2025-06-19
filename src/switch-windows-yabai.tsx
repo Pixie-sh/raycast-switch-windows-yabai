@@ -4,7 +4,7 @@ import {useExec} from "@raycast/utils";
 import {useState, useEffect, useMemo, useCallback} from "react";
 import {ENV, YABAI, YabaiWindow, SortMethod, Application} from "./models";
 import {handleAggregateToSpace, handleCloseEmptySpaces, handleCloseWindow, handleFocusWindow} from "./handlers";
-import {DisplayActions} from "./display-actions-yabai";
+import {DisplayActions, MoveWindowToDisplayActions} from "./display-actions-yabai";
 import Fuse from "fuse.js";
 import {existsSync, readdirSync} from "node:fs";
 import * as path from "node:path";
@@ -573,6 +573,7 @@ function WindowActions({
                 icon={{source: "arrow.clockwise"}}
             />
             <DisplayActions/>
+            <MoveWindowToDisplayActions windowId={windowId} windowApp={windowApp} />
             <ActionPanel.Section title="Sorting">
                 <Action
                     title="Sort by Usage"
