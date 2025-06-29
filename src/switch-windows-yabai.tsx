@@ -1,5 +1,5 @@
 // TypeScript
-import { Action, ActionPanel, List, LocalStorage, LaunchType } from "@raycast/api";
+import { Action, ActionPanel, List, LocalStorage, LaunchType, closeMainWindow } from "@raycast/api";
 import { useExec } from "@raycast/utils";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { ENV, YABAI, YabaiWindow, SortMethod, Application } from "./models";
@@ -465,16 +465,19 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
               icon={getAppIcon(win)}
               title={win.app}
               subtitle={win.title}
+              accessories={win.focused ? [{ text: "focused" }] : []}
               actions={
                 <WindowActions
                   windowId={win.id}
                   windowApp={win.app}
-                  onFocused={(id) =>
+                  isFocused={win.focused}
+                  onFocused={(id) => {
                     setUsageTimes((prev) => ({
                       ...prev,
                       [id]: Date.now(),
-                    }))
-                  }
+                    }));
+                    closeMainWindow();
+                  }}
                   onRemove={removeWindow}
                   sortMethod={sortMethod}
                   setSortMethod={setSortMethod}
@@ -540,6 +543,7 @@ function WindowActions({
   setSortMethod,
   onRefresh,
   isRefreshing,
+  isFocused,
 }: {
   windowId: number;
   windowApp: string;
@@ -549,12 +553,13 @@ function WindowActions({
   setSortMethod: (method: SortMethod) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
+  isFocused?: boolean;
 }) {
   return (
     <ActionPanel>
       <Action
         title="Switch to Window"
-        onAction={handleFocusWindow(windowId, windowApp, onFocused)}
+        onAction={isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused)}
         shortcut={{ modifiers: [], key: "enter" }}
       />
       <Action

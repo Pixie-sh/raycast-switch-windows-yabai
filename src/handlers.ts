@@ -21,12 +21,11 @@ export const handleFocusWindow = (windowId: number, windowApp: string, onFocused
           message: stderr.trim(),
         });
       } else {
-        onFocused(windowId);
         await showToast({
           style: Toast.Style.Success,
           title: `${windowApp} focused`,
-          message: `Window ${windowApp} (${windowId}) focused`,
         });
+        onFocused(windowId);
       }
     } catch (error: unknown) {
       await showToast({
