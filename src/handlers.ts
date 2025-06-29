@@ -160,7 +160,9 @@ export const handleAggregateToSpace = (windowId: number, windowApp: string) => {
             console.log(`Moved window ${win.id} to space ${targetSpaceId}.`);
           }
         } catch (innerError: unknown) {
-          console.error(`Exception while moving window ${win.id}: ${innerError instanceof Error ? innerError.message : "Unknown error"}`);
+          console.error(
+            `Exception while moving window ${win.id}: ${innerError instanceof Error ? innerError.message : "Unknown error"}`,
+          );
         }
       }
 
