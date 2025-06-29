@@ -289,7 +289,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         // Custom sort function to prioritize exact matches
         if (a.score === b.score) {
           // If scores are equal, prioritize shorter matches (more precise)
-          return a.item.title.length - b.item.title.length;
+          return a.item.title.toString().length - b.item.title.toString().length;
         }
         return a.score - b.score; // Lower score is better
       },
@@ -309,7 +309,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         // Custom sort function to prioritize exact matches
         if (a.score === b.score) {
           // If scores are equal, prioritize shorter names (more precise)
-          return a.item.name.length - b.item.name.length;
+          return a.item.name.toString().length - b.item.name.toString().length;
         }
         return a.score - b.score; // Lower score is better
       },
@@ -560,7 +560,6 @@ function WindowActions({
       <Action
         title="Switch to Window"
         onAction={isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused)}
-        shortcut={{ modifiers: [], key: "enter" }}
       />
       <Action
         title="Aggregate to Space"
@@ -658,31 +657,34 @@ function getAppIcon(window: YabaiWindow) {
   }
 
   // Try to find a generic icon for the app type
-  let genericIcon = { source: "app-generic" };
+  let genericIcon = {
+    source: "app-generic",
+    fileIcon: ""
+  };
 
   // Set more specific generic icons based on app name
   if (appName.toLowerCase().includes("chrome")) {
-    genericIcon = { source: "globe" };
+    genericIcon = { ...genericIcon, source: "globe" };
   } else if (appName.toLowerCase().includes("terminal") || appName.toLowerCase().includes("iterm")) {
-    genericIcon = { source: "terminal" };
+    genericIcon = { ...genericIcon, source: "terminal" };
   } else if (appName.toLowerCase().includes("safari") || appName.toLowerCase().includes("firefox")) {
-    genericIcon = { source: "globe" };
+    genericIcon = { ...genericIcon, source: "globe" };
   } else if (appName.toLowerCase().includes("mail") || appName.toLowerCase().includes("outlook")) {
-    genericIcon = { source: "envelope" };
+    genericIcon = { ...genericIcon, source: "envelope" };
   } else if (
     appName.toLowerCase().includes("slack") ||
     appName.toLowerCase().includes("whatsapp") ||
     appName.toLowerCase().includes("messages") ||
     appName.toLowerCase().includes("telegram")
   ) {
-    genericIcon = { source: "message" };
+    genericIcon = { ...genericIcon, source: "message" };
   } else if (
     appName.toLowerCase().includes("notes") ||
     appName.toLowerCase().includes("text") ||
     appName.toLowerCase().includes("word") ||
     appName.toLowerCase().includes("pages")
   ) {
-    genericIcon = { source: "document" };
+    genericIcon = { ...genericIcon,source: "document" };
   } else if (
     appName.toLowerCase().includes("code") ||
     appName.toLowerCase().includes("studio") ||
@@ -690,7 +692,7 @@ function getAppIcon(window: YabaiWindow) {
     appName.toLowerCase().includes("intellij") ||
     appName.toLowerCase().includes("pycharm")
   ) {
-    genericIcon = { source: "terminal" };
+    genericIcon = { ...genericIcon, source: "terminal" };
   }
 
   // Build a chain of fallbacks
@@ -699,8 +701,8 @@ function getAppIcon(window: YabaiWindow) {
   // Go through possible paths in reverse order to build the fallback chain
   for (let i = possiblePaths.length - 1; i >= 0; i--) {
     iconConfig = {
+      source: "",
       fileIcon: possiblePaths[i],
-      fallback: iconConfig,
     };
   }
 

@@ -25,10 +25,11 @@
  */
 
 import React from "react";
-import { Action } from "@raycast/api";
+import { Action, Keyboard } from "@raycast/api";
 import { useExec } from "@raycast/utils";
 import { handleDisperseWindowsBySpace, handleMoveWindowToDisplay } from "./handlers";
 import { ENV, YABAI } from "./models";
+import KeyEquivalent = Keyboard.KeyEquivalent;
 
 interface Display {
   id: number;
@@ -72,7 +73,7 @@ export function DisplayActions() {
           key={display.id}
           title={`Disperse Windows for Display #${display.index}`}
           onAction={handleDisperseWindowsBySpace(String(display.index))}
-          shortcut={{ modifiers: ["cmd", "shift"], key: display.index.toString() }}
+          shortcut={{ modifiers: ["ctrl", "cmd"], key: display.index.toString() as KeyEquivalent }}
         />
       ))}
     </>
@@ -108,7 +109,10 @@ export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowTo
 
   if (isLoading) return null;
   if (error) return null;
-  if (!displays || displays.length <= 1) return null; // No need to show if there's only one display
+
+  if (!displays || displays.length <= 1) {
+    return <Action title="Move to Another Display (Only 1 Available)" onAction={() => {}} />;
+  }
 
   return (
     <>
@@ -117,7 +121,7 @@ export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowTo
           key={display.id}
           title={`Move to Display #${display.index}`}
           onAction={handleMoveWindowToDisplay(windowId, windowApp, String(display.index))}
-          shortcut={{ modifiers: ["cmd", "opt"], key: display.index.toString() }}
+          shortcut={{ modifiers: ["cmd", "shift"], key: display.index.toString() as KeyEquivalent }}
         />
       ))}
     </>
