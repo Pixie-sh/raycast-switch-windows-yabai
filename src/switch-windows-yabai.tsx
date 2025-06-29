@@ -462,7 +462,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
             <List.Item
               key={win.id}
               id={`window-${win.id}`} // Add id for default selection
-              icon={getAppIcon(win)}
+              icon={getAppIcon(win, applications)}
               title={win.app}
               subtitle={win.title}
               accessories={win.focused ? [{ text: "focused" }] : []}
@@ -604,107 +604,62 @@ function WindowActions({
   );
 }
 
-function getAppIcon(window: YabaiWindow) {
+function getAppIcon(window: YabaiWindow, applications: Application[]) {
   const appName = window.app;
 
-  // Handle special cases for system apps
+  // 1. Try to find the application in the pre-loaded applications list
+  const foundApp = applications.find((app) => app.name === appName);
+  if (foundApp) {
+    return { fileIcon: foundApp.path };
+  }
+
+  // 2. Handle special cases for system apps with known paths or built-in icons
   if (appName === "Finder") {
     return { fileIcon: "/System/Library/CoreServices/Finder.app" };
   }
-
   if (appName === "SystemUIServer" || appName === "Control Center") {
-    return { source: "gear" };
+    return { source: "gear" }; // Raycast built-in icon
   }
 
-  // Create a list of possible paths for the app
-  const possiblePaths = [
-    `/Applications/${appName}.app`,
-    `~/Applications/${appName}.app`,
-    `/System/Applications/${appName}.app`,
-    `/System/Library/CoreServices/${appName}.app`,
-  ];
-
-  // Special cases for common apps
-  if (appName.toLowerCase().includes("whatsapp")) {
-    possiblePaths.unshift("/Applications/WhatsApp.app");
-  }
-
-  // Special cases for JetBrains IDEs
-  const jetBrainsMap = {
-    WebStorm: [
-      "/Applications/WebStorm.app",
-      "~/Library/Application Support/JetBrains/Toolbox/apps/WebStorm/ch-0/*/WebStorm.app",
-    ],
-    "IntelliJ IDEA": [
-      "/Applications/IntelliJ IDEA.app",
-      "/Applications/IntelliJ IDEA CE.app",
-      "~/Library/Application Support/JetBrains/Toolbox/apps/IDEA-U/ch-0/*/IntelliJ IDEA.app",
-    ],
-    PyCharm: [
-      "/Applications/PyCharm.app",
-      "/Applications/PyCharm CE.app",
-      "~/Library/Application Support/JetBrains/Toolbox/apps/PyCharm-P/ch-0/*/PyCharm.app",
-    ],
-  };
-
-  // Check if it's a JetBrains IDE
-  for (const [ideName, paths] of Object.entries(jetBrainsMap)) {
-    if (appName === ideName) {
-      // Add JetBrains specific paths to the beginning of our search list
-      possiblePaths.unshift(...paths);
-      break;
-    }
-  }
-
-  // Try to find a generic icon for the app type
-  let genericIcon = {
-    source: "app-generic",
-    fileIcon: ""
-  };
-
-  // Set more specific generic icons based on app name
+  // 3. Handle common apps with specific Raycast built-in icons
   if (appName.toLowerCase().includes("chrome")) {
-    genericIcon = { ...genericIcon, source: "globe" };
-  } else if (appName.toLowerCase().includes("terminal") || appName.toLowerCase().includes("iterm")) {
-    genericIcon = { ...genericIcon, source: "terminal" };
-  } else if (appName.toLowerCase().includes("safari") || appName.toLowerCase().includes("firefox")) {
-    genericIcon = { ...genericIcon, source: "globe" };
-  } else if (appName.toLowerCase().includes("mail") || appName.toLowerCase().includes("outlook")) {
-    genericIcon = { ...genericIcon, source: "envelope" };
-  } else if (
+    return { source: "globe" };
+  }
+  if (appName.toLowerCase().includes("terminal") || appName.toLowerCase().includes("iterm")) {
+    return { source: "terminal" };
+  }
+  if (appName.toLowerCase().includes("safari") || appName.toLowerCase().includes("firefox")) {
+    return { source: "globe" };
+  }
+  if (appName.toLowerCase().includes("mail") || appName.toLowerCase().includes("outlook")) {
+    return { source: "envelope" };
+  }
+  if (
     appName.toLowerCase().includes("slack") ||
     appName.toLowerCase().includes("whatsapp") ||
     appName.toLowerCase().includes("messages") ||
     appName.toLowerCase().includes("telegram")
   ) {
-    genericIcon = { ...genericIcon, source: "message" };
-  } else if (
+    return { source: "message" };
+  }
+  if (
     appName.toLowerCase().includes("notes") ||
     appName.toLowerCase().includes("text") ||
     appName.toLowerCase().includes("word") ||
     appName.toLowerCase().includes("pages")
   ) {
-    genericIcon = { ...genericIcon,source: "document" };
-  } else if (
+    return { source: "document" };
+  }
+  if (
     appName.toLowerCase().includes("code") ||
     appName.toLowerCase().includes("studio") ||
     appName.toLowerCase().includes("webstorm") ||
     appName.toLowerCase().includes("intellij") ||
     appName.toLowerCase().includes("pycharm")
   ) {
-    genericIcon = { ...genericIcon, source: "terminal" };
+    return { source: "terminal" }; // Using terminal for IDEs, could be 'code' if available
   }
 
-  // Build a chain of fallbacks
-  let iconConfig = genericIcon;
-
-  // Go through possible paths in reverse order to build the fallback chain
-  for (let i = possiblePaths.length - 1; i >= 0; i--) {
-    iconConfig = {
-      source: "",
-      fileIcon: possiblePaths[i],
-    };
-  }
-
-  return iconConfig;
+  // 4. Fallback to a generic application icon
+  return { source: "app-generic" };
 }
