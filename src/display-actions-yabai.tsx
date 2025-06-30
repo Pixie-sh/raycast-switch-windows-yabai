@@ -73,7 +73,7 @@ export function DisplayActions() {
           key={display.id}
           title={`Disperse Windows for Display #${display.index}`}
           onAction={handleDisperseWindowsBySpace(String(display.index))}
-          shortcut={{ modifiers: ["ctrl", "cmd"], key: display.index.toString() as KeyEquivalent }}
+          shortcut={{ modifiers: ["opt", "cmd"], key: display.index.toString() as KeyEquivalent }}
         />
       ))}
     </>
@@ -121,7 +121,7 @@ export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowTo
           key={display.id}
           title={`Move to Display #${display.index}`}
           onAction={handleMoveWindowToDisplay(windowId, windowApp, String(display.index))}
-          shortcut={{ modifiers: ["cmd", "shift"], key: display.index.toString() as KeyEquivalent }}
+          shortcut={{ modifiers: ["cmd", "ctrl"], key: display.index.toString() as KeyEquivalent }}
         />
       ))}
     </>
