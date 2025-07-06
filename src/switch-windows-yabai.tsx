@@ -138,8 +138,8 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       if (storedTimes) {
         try {
           setUsageTimes(JSON.parse(storedTimes));
-        } catch {
-          setUsageTimes({});
+        } catch (e) {
+          console.error("error setting stored times;", e);
         }
       }
 
@@ -450,8 +450,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
           <Action
             title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
             onAction={refreshAllData}
-            shortcut={{ modifiers: ["cmd"], key: "r" }}
-            icon={{ source: "arrow.clockwise" }}
+            shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
           />
         </ActionPanel>
       }
@@ -479,7 +478,6 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
                     closeMainWindow();
                   }}
                   onRemove={removeWindow}
-                  sortMethod={sortMethod}
                   setSortMethod={setSortMethod}
                   onRefresh={refreshAllData}
                   isRefreshing={isRefreshing}
@@ -509,8 +507,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
                   <Action
                     title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
                     onAction={refreshAllData}
-                    shortcut={{ modifiers: ["cmd"], key: "r" }}
-                    icon={{ source: "arrow.clockwise" }}
+                    shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
                   />
                 </ActionPanel>
               }
@@ -539,7 +536,6 @@ function WindowActions({
   windowApp,
   onFocused,
   onRemove,
-  sortMethod,
   setSortMethod,
   onRefresh,
   isRefreshing,
@@ -549,7 +545,6 @@ function WindowActions({
   windowApp: string;
   onFocused: (id: number) => void;
   onRemove: (id: number) => void;
-  sortMethod: SortMethod;
   setSortMethod: (method: SortMethod) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
@@ -564,41 +559,30 @@ function WindowActions({
       <Action
         title="Aggregate to Space"
         onAction={handleAggregateToSpace(windowId, windowApp)}
-        shortcut={{ modifiers: ["cmd", "shift"], key: "m" }}
+        shortcut={{ modifiers: ["cmd", "ctrl"], key: "m" }}
       />
       <Action
         title="Close Window"
         onAction={handleCloseWindow(windowId, windowApp, onRemove)}
-        shortcut={{ modifiers: ["cmd", "shift"], key: "w" }}
+        shortcut={{ modifiers: ["cmd", "ctrl"], key: "w" }}
       />
       <Action
         title="Close Empty Spaces"
         onAction={handleCloseEmptySpaces(windowId, onRemove)}
-        shortcut={{ modifiers: ["cmd", "shift"], key: "q" }}
+        shortcut={{ modifiers: ["cmd", "ctrl"], key: "q" }}
       />
       <Action
         title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
         onAction={onRefresh}
-        shortcut={{ modifiers: ["cmd"], key: "r" }}
-        icon={{ source: "arrow.clockwise" }}
+        shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
       />
       <ActionPanel.Section title="Display Actions">
         <DisplayActions />
         <MoveWindowToDisplayActions windowId={windowId} windowApp={windowApp} />
       </ActionPanel.Section>
-      <ActionPanel.Section title="Sorting">
-        <Action
-          title="Sort by Usage"
-          onAction={() => setSortMethod(SortMethod.USAGE)}
-          shortcut={{ modifiers: ["cmd"], key: "1" }}
-          icon={sortMethod === SortMethod.USAGE ? { source: "checkmark" } : null}
-        />
-        <Action
-          title="Sort by Previous"
-          onAction={() => setSortMethod(SortMethod.RECENTLY_USED)}
-          shortcut={{ modifiers: ["cmd"], key: "2" }}
-          icon={sortMethod === SortMethod.RECENTLY_USED ? { source: "checkmark" } : null}
-        />
+      <ActionPanel.Section title="Sort by">
+        <Action title="Sort by Previous" onAction={() => setSortMethod(SortMethod.RECENTLY_USED)} />
+        <Action title="Sort by Usage" onAction={() => setSortMethod(SortMethod.USAGE)} />
       </ActionPanel.Section>
     </ActionPanel>
   );
