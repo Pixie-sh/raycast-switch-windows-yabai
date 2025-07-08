@@ -407,15 +407,15 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         .map(([id]) => parseInt(id));
 
       // Find the corresponding windows
-      const previousWindow = windows.find((w) => w.id === recentlyUsedIds[0]);
-      const currentWindow = windows.find((w) => w.id === recentlyUsedIds[1]);
+      const previousWindow = windows.find((w) => w.id === recentlyUsedIds[1]);
+      const currentWindow = windows.find((w) => w.id === recentlyUsedIds[0]);
 
       return windows.sort((a, b) => {
-        // Previous window (most recently used) comes first
+        // Previous window (second most recently used) comes first
         if (previousWindow && a.id === previousWindow.id) return -1;
         if (previousWindow && b.id === previousWindow.id) return 1;
 
-        // Current window (second most recently used) comes second
+        // Current window (most recently used) comes second
         if (currentWindow && a.id === currentWindow.id) return -1;
         if (currentWindow && b.id === currentWindow.id) return 1;
 
