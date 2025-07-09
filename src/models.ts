@@ -19,7 +19,8 @@ export interface YabaiWindow {
   "root-window"?: boolean;
   display?: number;
   level?: number;
-  focused?: boolean;
+  focused?: boolean; // Legacy property for compatibility
+  "has-focus"?: boolean; // Actual property from yabai
   "is-native-fullscreen"?: boolean;
 }
 

@@ -70,12 +70,32 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
 
+  // Focus history to track current and previous focused windows
+  const [focusHistory, setFocusHistory] = useState<{
+    current: number | null;
+    previous: number | null;
+  }>({ current: null, previous: null });
+
   // Function to remove a window from the local listing after it's closed.
   const removeWindow = useCallback((id: number) => {
     setWindows((prevWindows) => prevWindows.filter((w) => w.id !== id));
   }, []);
 
-  // Function to refresh applications data
+  const updateFocusHistory = useCallback((windowsData: YabaiWindow[]) => {
+    const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
+    const currentFocusedId = currentlyFocused?.id || null;
+
+    setFocusHistory((prevHistory) => {
+      if (currentFocusedId !== prevHistory.current) {
+        return {
+          current: currentFocusedId,
+          previous: prevHistory.current,
+        };
+      }
+      return prevHistory;
+    });
+  }, []);
+
   const refreshApplications = useCallback(async () => {
     try {
       const freshApps = listApplications();
@@ -101,6 +121,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
           const parsed = JSON.parse(stdoutStr);
           const windowsData = Array.isArray(parsed) ? parsed : [];
           setWindows(windowsData);
+          updateFocusHistory(windowsData);
 
           // Update cache with timestamp
           const cacheData = {
@@ -131,7 +152,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     }
   }, [refreshWindows, refreshApplications]);
 
-  // Load previous usage times and sort method from local storage when the component mounts.
+  // Load previous usage times, sort method, and focus history from local storage when the component mounts.
   useEffect(() => {
     (async () => {
       const storedTimes = await LocalStorage.getItem<string>("usageTimes");
@@ -152,6 +173,16 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
           setSortMethod(SortMethod.USAGE);
         }
       }
+
+      const storedFocusHistory = await LocalStorage.getItem<string>("focusHistory");
+      if (storedFocusHistory) {
+        try {
+          const parsedFocusHistory = JSON.parse(storedFocusHistory);
+          setFocusHistory(parsedFocusHistory);
+        } catch (e) {
+          console.error("error setting stored focus history;", e);
+        }
+      }
     })();
   }, []);
 
@@ -164,6 +195,11 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   useEffect(() => {
     LocalStorage.setItem("sortMethod", JSON.stringify(sortMethod));
   }, [sortMethod]);
+
+  // Persist focus history in local storage when it changes.
+  useEffect(() => {
+    LocalStorage.setItem("focusHistory", JSON.stringify(focusHistory));
+  }, [focusHistory]);
 
   // Query windows using useExec.
   const { isLoading, data, error } = useExec<YabaiWindow[]>(YABAI, ["-m", "query", "--windows"], {
@@ -193,6 +229,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
           const { windows: cachedWindows, timestamp } = JSON.parse(cachedData);
           if (Array.isArray(cachedWindows) && cachedWindows.length > 0) {
             setWindows(cachedWindows);
+            updateFocusHistory(cachedWindows);
             setLastRefreshTime(timestamp);
             console.log("Loaded windows from cache, timestamp:", new Date(timestamp).toLocaleString());
           }
@@ -207,6 +244,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     // Handle data changes from useExec
     if (data !== undefined) {
       setWindows(data);
+      updateFocusHistory(data);
 
       // Update cache with timestamp
       const cacheData = {
@@ -218,6 +256,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       console.log("Updated windows cache from useExec");
     } else if (!isLoading && !error && !data) {
       setWindows([]);
+      updateFocusHistory([]);
     }
   }, [data, isLoading, error]);
 
@@ -399,28 +438,24 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         return timeB - timeA;
       });
     } else if (sortMethod === SortMethod.RECENTLY_USED) {
-      // Sort by recently used
-      // Get the two most recently used windows (by timestamp)
-      const recentlyUsedIds = Object.entries(usageTimes)
-        .sort(([, timeA], [, timeB]) => timeB - timeA)
-        .slice(0, 2)
-        .map(([id]) => parseInt(id));
-
-      // Find the corresponding windows
-      const previousWindow = windows.find((w) => w.id === recentlyUsedIds[1]);
-      const currentWindow = windows.find((w) => w.id === recentlyUsedIds[0]);
+      // Sort by recently used using real-time focus history from yabai
+      // Find the corresponding windows based on focus history
+      const previousWindow = focusHistory.previous ? windows.find((w) => w.id === focusHistory.previous) : null;
+      const currentWindow = focusHistory.current ? windows.find((w) => w.id === focusHistory.current) : null;
 
       return windows.sort((a, b) => {
-        // Previous window (second most recently used) comes first
+        // Previous window comes first
         if (previousWindow && a.id === previousWindow.id) return -1;
         if (previousWindow && b.id === previousWindow.id) return 1;
 
-        // Current window (most recently used) comes second
+        // Current window comes second
         if (currentWindow && a.id === currentWindow.id) return -1;
         if (currentWindow && b.id === currentWindow.id) return 1;
 
-        // Rest in alphabetical order
-        return a.app.localeCompare(b.app);
+        // For the rest (third position onwards), follow prepend logic - sort by usage time (most recent first)
+        const timeA = usageTimes[a.id] || 0;
+        const timeB = usageTimes[b.id] || 0;
+        return timeB - timeA;
       });
     }
 
@@ -430,7 +465,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       const timeB = usageTimes[b.id] || 0;
       return timeB - timeA;
     });
-  }, [filteredWindows, usageTimes, sortMethod]);
+  }, [filteredWindows, usageTimes, sortMethod, focusHistory]);
 
   // Always select the first window in the list
   const firstWindow = useMemo(() => {
@@ -444,7 +479,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       searchBarPlaceholder="Search windows and applications..."
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
-      selectedItemId={firstWindow ? `window-${firstWindow.id}` : undefined} // Select first window by default
+      selectedItemId={firstWindow ? `window-${firstWindow.id}` : undefined} // Select first window by default (index 0)
       actions={
         <ActionPanel>
           <Action
@@ -464,12 +499,12 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
               icon={getAppIcon(win, applications)}
               title={win.app}
               subtitle={win.title}
-              accessories={win.focused ? [{ text: "focused" }] : []}
+              accessories={win["has-focus"] || win.focused ? [{ text: "focused" }] : []}
               actions={
                 <WindowActions
                   windowId={win.id}
                   windowApp={win.app}
-                  isFocused={win.focused}
+                  isFocused={win["has-focus"] || win.focused}
                   onFocused={(id) => {
                     setUsageTimes((prev) => ({
                       ...prev,
