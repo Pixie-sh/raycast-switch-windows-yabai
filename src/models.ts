@@ -32,6 +32,7 @@ export enum SortMethod {
 export interface YabaiSpace {
   index: number;
   windows: YabaiWindow[];
+  display: number;
 }
 
 export const YABAI = existsSync("/opt/homebrew/bin/yabai")

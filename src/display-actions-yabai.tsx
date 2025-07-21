@@ -27,7 +27,7 @@
 import React from "react";
 import { Action, Keyboard } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { handleDisperseWindowsBySpace, handleMoveWindowToDisplay } from "./handlers";
+import { handleDisperseWindowsBySpace, handleMoveWindowToDisplay, handleMoveToDisplaySpace } from "./handlers";
 import { ENV, YABAI } from "./models";
 import KeyEquivalent = Keyboard.KeyEquivalent;
 
@@ -41,7 +41,7 @@ interface Display {
   "has-focus": boolean;
 }
 
-export function DisplayActions() {
+export function DisperseOnDisplayActions() {
   const {
     isLoading,
     data: displays,
@@ -125,5 +125,20 @@ export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowTo
         />
       ))}
     </>
+  );
+}
+
+interface MoveToDisplaySpaceProps {
+  windowId: number;
+  windowApp: string;
+}
+
+export function MoveToDisplaySpace({ windowId, windowApp }: MoveToDisplaySpaceProps) {
+  return (
+    <Action
+      title="Move to Empty Space on Current Display"
+      onAction={handleMoveToDisplaySpace(windowId, windowApp)}
+      shortcut={{ modifiers: ["cmd", "shift"], key: "m" }}
+    />
   );
 }

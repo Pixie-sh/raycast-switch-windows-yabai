@@ -342,3 +342,107 @@ export const handleDisperseWindowsBySpace = (screenIdx: string) => {
     }
   };
 };
+
+// Move window to an empty space on the current display, or create a new space if none exists
+export const handleMoveToDisplaySpace = (windowId: number, windowApp: string) => {
+  return async () => {
+    await showToast({ style: Toast.Style.Animated, title: "Moving Window to Display Space..." });
+    try {
+      // Step 1: Get the current window info to determine its display
+      const windowResult = await execFilePromise(YABAI, ["-m", "query", "--windows", "--window", windowId.toString()], {
+        env: ENV,
+      });
+
+      const windowStdout =
+        typeof windowResult.stdout === "string" ? windowResult.stdout : JSON.stringify(windowResult.stdout);
+      const windowInfo: YabaiWindow = JSON.parse(windowStdout);
+      const currentDisplay = windowInfo.display;
+
+      console.log(`Window ${windowId} is on display ${currentDisplay}`);
+
+      // Step 2: Query all spaces to find empty ones on the current display
+      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
+      const spacesStdout =
+        typeof spacesResult.stdout === "string" ? spacesResult.stdout : JSON.stringify(spacesResult.stdout);
+      const allSpaces: YabaiSpace[] = JSON.parse(spacesStdout);
+
+      // Find empty spaces on the current display
+      const emptySpacesOnDisplay = allSpaces.filter(
+        (space) => space.display === currentDisplay && Array.isArray(space.windows) && space.windows.length === 0,
+      );
+
+      let targetSpaceIndex: number;
+
+      if (emptySpacesOnDisplay.length > 0) {
+        // Use the first empty space found
+        targetSpaceIndex = emptySpacesOnDisplay[0].index;
+        console.log(`Found empty space ${targetSpaceIndex} on display ${currentDisplay}`);
+      } else {
+        // Create a new space
+        console.log(`No empty spaces found on display ${currentDisplay}, creating new space`);
+        await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
+
+        // Re-query spaces to get the newly created space
+        const updatedSpacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
+        const updatedSpacesStdout =
+          typeof updatedSpacesResult.stdout === "string"
+            ? updatedSpacesResult.stdout
+            : JSON.stringify(updatedSpacesResult.stdout);
+        const updatedSpaces: YabaiSpace[] = JSON.parse(updatedSpacesStdout);
+
+        // Find the newly created empty space on the current display
+        const newEmptySpaces = updatedSpaces.filter(
+          (space) => space.display === currentDisplay && Array.isArray(space.windows) && space.windows.length === 0,
+        );
+
+        if (newEmptySpaces.length > 0) {
+          targetSpaceIndex = newEmptySpaces[0].index;
+          console.log(`Created new space ${targetSpaceIndex} on display ${currentDisplay}`);
+        } else {
+          throw new Error("Failed to create or find empty space");
+        }
+      }
+
+      // Step 3: Move the window to the target space
+      const moveResult = await execFilePromise(
+        YABAI,
+        ["-m", "window", windowId.toString(), "--space", targetSpaceIndex.toString()],
+        { env: ENV },
+      );
+
+      if (moveResult.stderr?.trim()) {
+        console.error(`Error moving window ${windowId}: ${moveResult.stderr.trim()}`);
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Yabai Error - Move Window to Space",
+          message: moveResult.stderr.trim(),
+        });
+        return;
+      }
+
+      // Step 4: Focus the target space
+      await execFilePromise(YABAI, ["-m", "space", "--focus", targetSpaceIndex.toString()], { env: ENV });
+
+      // Step 5: Focus the window
+      await execFilePromise(YABAI, ["-m", "window", "--focus", "first"], { env: ENV });
+
+      console.log(`Successfully moved window ${windowId} to space ${targetSpaceIndex} on display ${currentDisplay}`);
+
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Window Moved to Display Space",
+        message: `${windowApp} has been moved to ${emptySpacesOnDisplay.length > 0 ? "an empty" : "a new"} space on the current display and focused.`,
+      });
+    } catch (error: unknown) {
+      console.error("Move to display space failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Move to Display Space Failed",
+        message:
+          error instanceof Error
+            ? error.message
+            : "An unknown error occurred while moving the window to display space.",
+      });
+    }
+  };
+};

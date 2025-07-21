@@ -1,10 +1,10 @@
 // TypeScript
-import { Action, ActionPanel, List, LocalStorage, LaunchType, closeMainWindow } from "@raycast/api";
+import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { useState, useEffect, useMemo, useCallback } from "react";
-import { ENV, YABAI, YabaiWindow, SortMethod, Application } from "./models";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Application, ENV, SortMethod, YABAI, YabaiWindow } from "./models";
 import { handleAggregateToSpace, handleCloseEmptySpaces, handleCloseWindow, handleFocusWindow } from "./handlers";
-import { DisplayActions, MoveWindowToDisplayActions } from "./display-actions-yabai";
+import { DisperseOnDisplayActions, MoveToDisplaySpace, MoveWindowToDisplayActions } from "./display-actions-yabai";
 import Fuse from "fuse.js";
 import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
@@ -612,8 +612,9 @@ function WindowActions({
         shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
       />
       <ActionPanel.Section title="Display Actions">
-        <DisplayActions />
+        <DisperseOnDisplayActions />
         <MoveWindowToDisplayActions windowId={windowId} windowApp={windowApp} />
+        <MoveToDisplaySpace windowId={windowId} windowApp={windowApp} />
       </ActionPanel.Section>
       <ActionPanel.Section title="Sort by">
         <Action title="Sort by Previous" onAction={() => setSortMethod(SortMethod.RECENTLY_USED)} />
