@@ -438,21 +438,27 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         return timeB - timeA;
       });
     } else if (sortMethod === SortMethod.RECENTLY_USED) {
-      // Sort by recently used using real-time focus history from yabai
-      // Find the corresponding windows based on focus history
-      const previousWindow = focusHistory.previous ? windows.find((w) => w.id === focusHistory.previous) : null;
-      const currentWindow = focusHistory.current ? windows.find((w) => w.id === focusHistory.current) : null;
+      // Sort by recently used using usage times instead of focus history
+      // Get the two most recently used windows (by usage timestamp)
+      const recentlyUsedIds = Object.entries(usageTimes)
+        .sort(([, timeA], [, timeB]) => timeB - timeA)
+        .slice(0, 2)
+        .map(([id]) => parseInt(id));
+
+      // Find the corresponding windows
+      const previousWindow = recentlyUsedIds[1] ? windows.find((w) => w.id === recentlyUsedIds[1]) : null; // second most recent
+      const currentWindow = recentlyUsedIds[0] ? windows.find((w) => w.id === recentlyUsedIds[0]) : null;  // most recent
 
       return windows.sort((a, b) => {
-        // Previous window comes first
+        // Previous window (second most recently used) comes first
         if (previousWindow && a.id === previousWindow.id) return -1;
         if (previousWindow && b.id === previousWindow.id) return 1;
 
-        // Current window comes second
+        // Current window (most recently used) comes second
         if (currentWindow && a.id === currentWindow.id) return -1;
         if (currentWindow && b.id === currentWindow.id) return 1;
 
-        // For the rest (third position onwards), follow prepend logic - sort by usage time (most recent first)
+        // For the rest (third position onwards), sort by usage time (most recent first)
         const timeA = usageTimes[a.id] || 0;
         const timeB = usageTimes[b.id] || 0;
         return timeB - timeA;
