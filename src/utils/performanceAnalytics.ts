@@ -13,7 +13,7 @@ interface PerformanceMetrics {
   duration: number;
   memory?: number;
   userAgent?: string;
-  context?: Record<string, any>;
+  context?: Record<string, unknown>;
 }
 
 interface PerformanceReport {
@@ -24,14 +24,17 @@ interface PerformanceReport {
     cacheHitRate: number;
     errorRate: number;
   };
-  operations: Record<string, {
-    count: number;
-    avgDuration: number;
-    minDuration: number;
-    maxDuration: number;
-    p95Duration: number;
-    successRate: number;
-  }>;
+  operations: Record<
+    string,
+    {
+      count: number;
+      avgDuration: number;
+      minDuration: number;
+      maxDuration: number;
+      p95Duration: number;
+      successRate: number;
+    }
+  >;
   trends: {
     performanceOverTime: Array<{
       timestamp: number;
@@ -61,11 +64,11 @@ class PerformanceAnalytics {
   }
 
   private setupMemoryMonitoring(): void {
-    if (typeof performance.memory !== 'undefined') {
+    if (typeof performance.memory !== "undefined") {
       setInterval(() => {
-        this.recordMetric('memory-check', 0, {
+        this.recordMetric("memory-check", 0, {
           memory: performance.memory.usedJSHeapSize,
-          heapLimit: performance.memory.jsHeapSizeLimit
+          heapLimit: performance.memory.jsHeapSizeLimit,
         });
       }, 60000); // Every minute
     }
@@ -73,12 +76,12 @@ class PerformanceAnalytics {
 
   private async loadStoredMetrics(): Promise<void> {
     try {
-      const stored = await storageManager.get<PerformanceMetrics[]>('performance-metrics');
+      const stored = await storageManager.get<PerformanceMetrics[]>("performance-metrics");
       if (stored && Array.isArray(stored)) {
         this.metrics = stored.slice(-this.maxMetrics);
       }
     } catch (error) {
-      console.error('Failed to load stored metrics:', error);
+      console.error("Failed to load stored metrics:", error);
     }
   }
 
@@ -86,26 +89,22 @@ class PerformanceAnalytics {
     try {
       // Keep only recent metrics to prevent storage bloat
       const recentMetrics = this.metrics.slice(-this.maxMetrics);
-      await storageManager.set('performance-metrics', recentMetrics);
+      await storageManager.set("performance-metrics", recentMetrics);
     } catch (error) {
-      console.error('Failed to save metrics:', error);
+      console.error("Failed to save metrics:", error);
     }
   }
 
-  recordMetric(
-    operation: string,
-    duration: number,
-    context?: Record<string, any>
-  ): void {
+  recordMetric(operation: string, duration: number, context?: Record<string, unknown>): void {
     const metric: PerformanceMetrics = {
       timestamp: Date.now(),
       operation,
       duration,
       context,
-      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined
+      userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
     };
 
-    if (typeof performance.memory !== 'undefined') {
+    if (typeof performance.memory !== "undefined") {
       metric.memory = performance.memory.usedJSHeapSize;
     }
 
@@ -128,19 +127,19 @@ class PerformanceAnalytics {
   generateReport(timeWindow?: number): PerformanceReport {
     // Use cached report if available and recent
     const now = Date.now();
-    if (this.reportCache && (now - this.lastReportTime) < this.reportCacheTimeout) {
+    if (this.reportCache && now - this.lastReportTime < this.reportCacheTimeout) {
       return this.reportCache;
     }
 
     const windowStart = timeWindow ? now - timeWindow : 0;
-    const relevantMetrics = this.metrics.filter(m => m.timestamp > windowStart);
+    const relevantMetrics = this.metrics.filter((m) => m.timestamp > windowStart);
 
     if (relevantMetrics.length === 0) {
       return this.getEmptyReport();
     }
 
     const report = this.buildReport(relevantMetrics);
-    
+
     // Cache the report
     this.reportCache = report;
     this.lastReportTime = now;
@@ -150,7 +149,7 @@ class PerformanceAnalytics {
 
   private buildReport(metrics: PerformanceMetrics[]): PerformanceReport {
     const operations = this.groupMetricsByOperation(metrics);
-    const summary = this.calculateSummary(metrics, operations);
+    const summary = this.calculateSummary(metrics);
     const trends = this.analyzeTrends(metrics);
     const recommendations = this.generateRecommendations(summary, operations, trends);
 
@@ -158,63 +157,62 @@ class PerformanceAnalytics {
       summary,
       operations,
       trends,
-      recommendations
+      recommendations,
     };
   }
 
-  private groupMetricsByOperation(metrics: PerformanceMetrics[]): Record<string, {
-    count: number;
-    avgDuration: number;
-    minDuration: number;
-    maxDuration: number;
-    p95Duration: number;
-    successRate: number;
-  }> {
+  private groupMetricsByOperation(metrics: PerformanceMetrics[]): Record<
+    string,
+    {
+      count: number;
+      avgDuration: number;
+      minDuration: number;
+      maxDuration: number;
+      p95Duration: number;
+      successRate: number;
+    }
+  > {
     const grouped: Record<string, number[]> = {};
-    
-    metrics.forEach(metric => {
+
+    metrics.forEach((metric) => {
       if (!grouped[metric.operation]) {
         grouped[metric.operation] = [];
       }
       grouped[metric.operation].push(metric.duration);
     });
 
-    const result: Record<string, any> = {};
+    const result: Record<string, unknown> = {};
 
     Object.entries(grouped).forEach(([operation, durations]) => {
       const sorted = durations.sort((a, b) => a - b);
       const sum = durations.reduce((acc, val) => acc + val, 0);
-      
+
       result[operation] = {
         count: durations.length,
         avgDuration: sum / durations.length,
         minDuration: sorted[0],
         maxDuration: sorted[sorted.length - 1],
         p95Duration: sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1],
-        successRate: 1.0 // TODO: Track failures
+        successRate: 1.0, // TODO: Track failures
       };
     });
 
     return result;
   }
 
-  private calculateSummary(
-    metrics: PerformanceMetrics[],
-    operations: Record<string, any>
-  ): PerformanceReport['summary'] {
+  private calculateSummary(metrics: PerformanceMetrics[]): PerformanceReport["summary"] {
     const totalDuration = metrics.reduce((sum, m) => sum + m.duration, 0);
     const avgResponseTime = metrics.length > 0 ? totalDuration / metrics.length : 0;
 
-    const memoryMetrics = metrics.filter(m => m.memory !== undefined);
-    const avgMemory = memoryMetrics.length > 0 
-      ? memoryMetrics.reduce((sum, m) => sum + (m.memory || 0), 0) / memoryMetrics.length
-      : 0;
+    const memoryMetrics = metrics.filter((m) => m.memory !== undefined);
+    const avgMemory =
+      memoryMetrics.length > 0 ? memoryMetrics.reduce((sum, m) => sum + (m.memory || 0), 0) / memoryMetrics.length : 0;
 
     // Calculate cache hit rate (approximation based on operation types)
-    const cacheOperations = metrics.filter(m => 
-      m.operation.includes('cache-hit') || m.operation.includes('cache-miss')
+    const cacheOperations = metrics.filter(
+      (m) => m.operation.includes("cache-hit") || m.operation.includes("cache-miss"),
     );
-    const cacheHits = metrics.filter(m => m.operation.includes('cache-hit')).length;
+    const cacheHits = metrics.filter((m) => m.operation.includes("cache-hit")).length;
     const cacheHitRate = cacheOperations.length > 0 ? cacheHits / cacheOperations.length : 0;
 
     return {
@@ -222,16 +220,16 @@ class PerformanceAnalytics {
       averageResponseTime: avgResponseTime,
       memoryUsage: avgMemory,
       cacheHitRate,
-      errorRate: 0 // TODO: Track errors
+      errorRate: 0, // TODO: Track errors
     };
   }
 
-  private analyzeTrends(metrics: PerformanceMetrics[]): PerformanceReport['trends'] {
+  private analyzeTrends(metrics: PerformanceMetrics[]): PerformanceReport["trends"] {
     // Group metrics by time buckets (e.g., 5-minute intervals)
     const bucketSize = 5 * 60 * 1000; // 5 minutes
     const buckets: Record<number, PerformanceMetrics[]> = {};
 
-    metrics.forEach(metric => {
+    metrics.forEach((metric) => {
       const bucketTime = Math.floor(metric.timestamp / bucketSize) * bucketSize;
       if (!buckets[bucketTime]) {
         buckets[bucketTime] = [];
@@ -239,33 +237,36 @@ class PerformanceAnalytics {
       buckets[bucketTime].push(metric);
     });
 
-    const performanceOverTime = Object.entries(buckets).map(([timestamp, bucketMetrics]) => {
-      const avgDuration = bucketMetrics.reduce((sum, m) => sum + m.duration, 0) / bucketMetrics.length;
-      const memoryMetrics = bucketMetrics.filter(m => m.memory !== undefined);
-      const avgMemory = memoryMetrics.length > 0 
-        ? memoryMetrics.reduce((sum, m) => sum + (m.memory || 0), 0) / memoryMetrics.length
-        : 0;
+    const performanceOverTime = Object.entries(buckets)
+      .map(([timestamp, bucketMetrics]) => {
+        const avgDuration = bucketMetrics.reduce((sum, m) => sum + m.duration, 0) / bucketMetrics.length;
+        const memoryMetrics = bucketMetrics.filter((m) => m.memory !== undefined);
+        const avgMemory =
+          memoryMetrics.length > 0
+            ? memoryMetrics.reduce((sum, m) => sum + (m.memory || 0), 0) / memoryMetrics.length
+            : 0;
 
-      return {
-        timestamp: parseInt(timestamp),
-        avgDuration,
-        memoryUsage: avgMemory
-      };
-    }).sort((a, b) => a.timestamp - b.timestamp);
+        return {
+          timestamp: parseInt(timestamp),
+          avgDuration,
+          memoryUsage: avgMemory,
+        };
+      })
+      .sort((a, b) => a.timestamp - b.timestamp);
 
     // Identify top bottlenecks
     const operationStats: Record<string, { total: number; count: number; maxDuration: number }> = {};
-    
-    metrics.forEach(metric => {
+
+    metrics.forEach((metric) => {
       if (!operationStats[metric.operation]) {
         operationStats[metric.operation] = { total: 0, count: 0, maxDuration: 0 };
       }
-      
+
       operationStats[metric.operation].total += metric.duration;
       operationStats[metric.operation].count += 1;
       operationStats[metric.operation].maxDuration = Math.max(
         operationStats[metric.operation].maxDuration,
-        metric.duration
+        metric.duration,
       );
     });
 
@@ -274,37 +275,38 @@ class PerformanceAnalytics {
         operation,
         avgDuration: stats.total / stats.count,
         frequency: stats.count,
-        impact: (stats.total / stats.count) * stats.count // Simple impact score
+        impact: (stats.total / stats.count) * stats.count, // Simple impact score
       }))
       .sort((a, b) => b.impact - a.impact)
       .slice(0, 5);
 
     return {
       performanceOverTime,
-      topBottlenecks
+      topBottlenecks,
     };
   }
 
   private generateRecommendations(
-    summary: PerformanceReport['summary'],
-    operations: Record<string, any>,
-    trends: PerformanceReport['trends']
+    summary: PerformanceReport["summary"],
+    operations: Record<string, unknown>,
+    trends: PerformanceReport["trends"],
   ): string[] {
     const recommendations: string[] = [];
 
     // Memory recommendations
-    if (summary.memoryUsage > 100 * 1024 * 1024) { // 100MB
-      recommendations.push('Consider reducing memory usage - current usage is high');
+    if (summary.memoryUsage > 100 * 1024 * 1024) {
+      // 100MB
+      recommendations.push("Consider reducing memory usage - current usage is high");
     }
 
     // Cache recommendations
     if (summary.cacheHitRate < 0.7) {
-      recommendations.push('Low cache hit rate detected - consider optimizing caching strategy');
+      recommendations.push("Low cache hit rate detected - consider optimizing caching strategy");
     }
 
     // Performance recommendations
     if (summary.averageResponseTime > 100) {
-      recommendations.push('Average response time is high - consider optimizing slow operations');
+      recommendations.push("Average response time is high - consider optimizing slow operations");
     }
 
     // Operation-specific recommendations
@@ -312,7 +314,7 @@ class PerformanceAnalytics {
       if (stats.avgDuration > 200) {
         recommendations.push(`${operation} is slow (${stats.avgDuration.toFixed(2)}ms avg) - consider optimization`);
       }
-      
+
       if (stats.count > 50 && stats.avgDuration > 50) {
         recommendations.push(`${operation} is frequently called and moderately slow - high impact optimization target`);
       }
@@ -322,20 +324,20 @@ class PerformanceAnalytics {
     if (trends.performanceOverTime.length > 2) {
       const recent = trends.performanceOverTime.slice(-3);
       const older = trends.performanceOverTime.slice(0, 3);
-      
+
       if (recent.length > 0 && older.length > 0) {
         const recentAvg = recent.reduce((sum, r) => sum + r.avgDuration, 0) / recent.length;
         const olderAvg = older.reduce((sum, r) => sum + r.avgDuration, 0) / older.length;
-        
+
         if (recentAvg > olderAvg * 1.2) {
-          recommendations.push('Performance has degraded recently - investigate for regressions');
+          recommendations.push("Performance has degraded recently - investigate for regressions");
         }
       }
     }
 
-    return recommendations.length > 0 
-      ? recommendations 
-      : ['Performance looks good! No specific recommendations at this time.'];
+    return recommendations.length > 0
+      ? recommendations
+      : ["Performance looks good! No specific recommendations at this time."];
   }
 
   private getEmptyReport(): PerformanceReport {
@@ -345,14 +347,14 @@ class PerformanceAnalytics {
         averageResponseTime: 0,
         memoryUsage: 0,
         cacheHitRate: 0,
-        errorRate: 0
+        errorRate: 0,
       },
       operations: {},
       trends: {
         performanceOverTime: [],
-        topBottlenecks: []
+        topBottlenecks: [],
       },
-      recommendations: ['No performance data available yet']
+      recommendations: ["No performance data available yet"],
     };
   }
 
@@ -377,31 +379,31 @@ class PerformanceAnalytics {
         totalMetrics: 0,
         oldestMetric: 0,
         newestMetric: 0,
-        operationTypes: []
+        operationTypes: [],
       };
     }
 
-    const timestamps = this.metrics.map(m => m.timestamp);
-    const operations = [...new Set(this.metrics.map(m => m.operation))];
+    const timestamps = this.metrics.map((m) => m.timestamp);
+    const operations = [...new Set(this.metrics.map((m) => m.operation))];
 
     return {
       totalMetrics: this.metrics.length,
       oldestMetric: Math.min(...timestamps),
       newestMetric: Math.max(...timestamps),
-      operationTypes: operations
+      operationTypes: operations,
     };
   }
 
   // Integration with existing performance monitor
   integrateWithMonitor(): void {
     const originalRecordMetric = performanceMonitor.recordMetric.bind(performanceMonitor);
-    
+
     performanceMonitor.recordMetric = (operation: string, duration: number) => {
       originalRecordMetric(operation, duration);
       this.recordMetric(operation, duration);
     };
 
-    console.log('🔗 Performance analytics integrated with performance monitor');
+    console.log("🔗 Performance analytics integrated with performance monitor");
   }
 }
 
@@ -409,6 +411,6 @@ class PerformanceAnalytics {
 export const performanceAnalytics = new PerformanceAnalytics();
 
 // Auto-integrate with performance monitor
-if (configManager.isFeatureEnabled('usePerformanceMonitoring')) {
+if (configManager.isFeatureEnabled("usePerformanceMonitoring")) {
   performanceAnalytics.integrateWithMonitor();
 }

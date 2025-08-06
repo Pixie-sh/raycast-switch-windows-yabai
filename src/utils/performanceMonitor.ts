@@ -37,7 +37,7 @@ export class PerformanceMonitor {
     const duration = performance.now() - startTime;
     this.recordMetric(operationName, duration);
     this.startTimes.delete(operationName);
-    
+
     return duration;
   }
 
@@ -97,7 +97,7 @@ export class PerformanceMonitor {
       max: sorted[sorted.length - 1],
       p95: sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1],
       p99: sorted[Math.floor(sorted.length * 0.99)] || sorted[sorted.length - 1],
-      values: [...values] // Return a copy to prevent external mutation
+      values: [...values], // Return a copy to prevent external mutation
     };
   }
 
@@ -136,8 +136,8 @@ export class PerformanceMonitor {
    */
   logSummary(): void {
     const stats = this.getAllStats();
-    console.group('🚀 Performance Summary');
-    
+    console.group("🚀 Performance Summary");
+
     Object.entries(stats).forEach(([operation, metric]) => {
       console.log(`📊 ${operation}:`);
       console.log(`  Avg: ${metric.avg.toFixed(2)}ms`);
@@ -145,9 +145,9 @@ export class PerformanceMonitor {
       console.log(`  Max: ${metric.max.toFixed(2)}ms`);
       console.log(`  P95: ${metric.p95.toFixed(2)}ms`);
       console.log(`  Count: ${metric.count}`);
-      console.log('');
+      console.log("");
     });
-    
+
     console.groupEnd();
   }
 
@@ -157,7 +157,7 @@ export class PerformanceMonitor {
   checkThreshold(operationName: string, thresholdMs: number): boolean {
     const stats = this.getStats(operationName);
     if (!stats) return false;
-    
+
     return stats.avg > thresholdMs;
   }
 
@@ -168,17 +168,19 @@ export class PerformanceMonitor {
     // Check for performance issues every 30 seconds
     setInterval(() => {
       const thresholds = {
-        'app-loading': 100, // 100ms threshold for app loading
-        'search-operation': 10, // 10ms threshold for search
-        'yabai-query': 100, // 100ms threshold for yabai queries
-        'cache-operation': 5, // 5ms threshold for cache operations
-        'storage-operation': 20, // 20ms threshold for storage operations
+        "app-loading": 100, // 100ms threshold for app loading
+        "search-operation": 10, // 10ms threshold for search
+        "yabai-query": 100, // 100ms threshold for yabai queries
+        "cache-operation": 5, // 5ms threshold for cache operations
+        "storage-operation": 20, // 20ms threshold for storage operations
       };
 
       Object.entries(thresholds).forEach(([operation, threshold]) => {
         if (this.checkThreshold(operation, threshold)) {
           const stats = this.getStats(operation);
-          console.warn(`⚠️ Performance Alert: ${operation} averaging ${stats?.avg.toFixed(2)}ms (threshold: ${threshold}ms)`);
+          console.warn(
+            `⚠️ Performance Alert: ${operation} averaging ${stats?.avg.toFixed(2)}ms (threshold: ${threshold}ms)`,
+          );
         }
       });
     }, 30000);
@@ -189,6 +191,6 @@ export class PerformanceMonitor {
 export const performanceMonitor = new PerformanceMonitor();
 
 // Auto-setup alerts in development
-if (process.env.NODE_ENV === 'development') {
+if (process.env.NODE_ENV === "development") {
   performanceMonitor.setupAlerts();
 }

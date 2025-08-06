@@ -8,7 +8,7 @@ import { performanceMonitor } from "./performanceMonitor";
 
 interface PendingWrite {
   key: string;
-  value: any;
+  value: unknown;
   timestamp: number;
 }
 
@@ -26,12 +26,12 @@ export class BatchedStorage {
   /**
    * Set an item to be written in the next batch
    */
-  setItem(key: string, value: any): void {
+  setItem(key: string, value: unknown): void {
     // Add to pending writes
     this.pendingWrites.set(key, {
       key,
       value,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
 
     // If we've reached max batch size, flush immediately
@@ -59,7 +59,7 @@ export class BatchedStorage {
     }
 
     // Otherwise read from LocalStorage
-    return performanceMonitor.measureAsync('storage-read', async () => {
+    return performanceMonitor.measureAsync("storage-read", async () => {
       return await LocalStorage.getItem<T>(key);
     });
   }
@@ -70,8 +70,8 @@ export class BatchedStorage {
   async removeItem(key: string): Promise<void> {
     // Remove from pending writes if it exists
     this.pendingWrites.delete(key);
-    
-    return performanceMonitor.measureAsync('storage-remove', async () => {
+
+    return performanceMonitor.measureAsync("storage-remove", async () => {
       await LocalStorage.removeItem(key);
     });
   }
@@ -94,7 +94,7 @@ export class BatchedStorage {
 
     // Perform all writes
     const startTime = performance.now();
-    
+
     try {
       await Promise.all(
         writes.map(async (write) => {
@@ -105,16 +105,15 @@ export class BatchedStorage {
             // Re-add failed write for retry
             this.pendingWrites.set(write.key, write);
           }
-        })
+        }),
       );
 
       const duration = performance.now() - startTime;
-      performanceMonitor.recordMetric('storage-batch-write', duration);
-      
+      performanceMonitor.recordMetric("storage-batch-write", duration);
+
       console.log(`📦 Batched ${writes.length} storage operations in ${duration.toFixed(2)}ms`);
-      
     } catch (error) {
-      console.error('Batch storage operation failed:', error);
+      console.error("Batch storage operation failed:", error);
     }
   }
 
@@ -157,7 +156,7 @@ export class BatchedStorage {
  */
 export class StorageManager {
   private batchedStorage: BatchedStorage;
-  private cache = new Map<string, { value: any; timestamp: number }>();
+  private cache = new Map<string, { value: unknown; timestamp: number }>();
   private readonly cacheTimeout: number;
 
   constructor(batchDelayMs: number = 500, cacheTimeoutMs: number = 30000) {
@@ -168,10 +167,10 @@ export class StorageManager {
   /**
    * Set a value with batching
    */
-  set(key: string, value: any): void {
+  set(key: string, value: unknown): void {
     // Update cache
     this.cache.set(key, { value, timestamp: Date.now() });
-    
+
     // Schedule batch write
     this.batchedStorage.setItem(key, value);
   }
@@ -182,13 +181,13 @@ export class StorageManager {
   async get<T>(key: string): Promise<T | undefined> {
     // Check cache first
     const cached = this.cache.get(key);
-    if (cached && (Date.now() - cached.timestamp) < this.cacheTimeout) {
+    if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
       return cached.value as T;
     }
 
     // Fetch from storage
     const value = await this.batchedStorage.getItem<T>(key);
-    
+
     // Update cache
     if (value !== undefined) {
       this.cache.set(key, { value, timestamp: Date.now() });
@@ -218,7 +217,7 @@ export class StorageManager {
   getStats(): { pending: number; cached: number } {
     return {
       pending: this.batchedStorage.getPendingCount(),
-      cached: this.cache.size
+      cached: this.cache.size,
     };
   }
 

@@ -16,8 +16,8 @@ interface WindowItemProps {
   setSortMethod: (method: SortMethod) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
-  getAppIcon: (window: YabaiWindow, applications: Application[]) => any;
-  WindowActions: React.ComponentType<any>;
+  getAppIcon: (window: YabaiWindow, applications: Application[]) => React.ReactElement | string;
+  WindowActions: React.ComponentType<unknown>;
 }
 
 /**
@@ -34,7 +34,7 @@ export const MemoizedWindowItem = memo<WindowItemProps>(
     onRefresh,
     isRefreshing,
     getAppIcon,
-    WindowActions
+    WindowActions,
   }) => {
     return (
       <List.Item
@@ -67,15 +67,15 @@ export const MemoizedWindowItem = memo<WindowItemProps>(
     if (prevProps.window.title !== nextProps.window.title) return false;
     if (prevProps.window["has-focus"] !== nextProps.window["has-focus"]) return false;
     if (prevProps.window.focused !== nextProps.window.focused) return false;
-    
+
     // Compare other props that might affect rendering
     if (prevProps.isRefreshing !== nextProps.isRefreshing) return false;
-    
+
     // Applications array comparison (length check is usually sufficient)
     if (prevProps.applications.length !== nextProps.applications.length) return false;
-    
+
     return true;
-  }
+  },
 );
 
 MemoizedWindowItem.displayName = "MemoizedWindowItem";
@@ -121,7 +121,7 @@ export const MemoizedApplicationItem = memo<ApplicationItemProps>(
       prevProps.application.name === nextProps.application.name &&
       prevProps.isRefreshing === nextProps.isRefreshing
     );
-  }
+  },
 );
 
 MemoizedApplicationItem.displayName = "MemoizedApplicationItem";
@@ -134,8 +134,8 @@ interface WindowListSectionProps {
   setSortMethod: (method: SortMethod) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
-  getAppIcon: (window: YabaiWindow, applications: Application[]) => any;
-  WindowActions: React.ComponentType<any>;
+  getAppIcon: (window: YabaiWindow, applications: Application[]) => React.ReactElement | string;
+  WindowActions: React.ComponentType<unknown>;
 }
 
 /**
@@ -152,7 +152,7 @@ export const MemoizedWindowListSection = memo<WindowListSectionProps>(
     onRefresh,
     isRefreshing,
     getAppIcon,
-    WindowActions
+    WindowActions,
   }) => {
     if (windows.length === 0) return null;
 
@@ -181,21 +181,21 @@ export const MemoizedWindowListSection = memo<WindowListSectionProps>(
     if (prevProps.windows.length !== nextProps.windows.length) return false;
     if (prevProps.isRefreshing !== nextProps.isRefreshing) return false;
     if (prevProps.applications.length !== nextProps.applications.length) return false;
-    
+
     // Compare windows array content
     for (let i = 0; i < prevProps.windows.length; i++) {
       const prevWindow = prevProps.windows[i];
       const nextWindow = nextProps.windows[i];
-      
+
       if (prevWindow.id !== nextWindow.id) return false;
       if (prevWindow.app !== nextWindow.app) return false;
       if (prevWindow.title !== nextWindow.title) return false;
       if (prevWindow["has-focus"] !== nextWindow["has-focus"]) return false;
       if (prevWindow.focused !== nextWindow.focused) return false;
     }
-    
+
     return true;
-  }
+  },
 );
 
 MemoizedWindowListSection.displayName = "MemoizedWindowListSection";
@@ -232,15 +232,15 @@ export const MemoizedApplicationListSection = memo<ApplicationListSectionProps>(
   (prevProps, nextProps) => {
     if (prevProps.applications.length !== nextProps.applications.length) return false;
     if (prevProps.isRefreshing !== nextProps.isRefreshing) return false;
-    
+
     // Compare applications array content
     for (let i = 0; i < prevProps.applications.length; i++) {
       if (prevProps.applications[i].path !== nextProps.applications[i].path) return false;
       if (prevProps.applications[i].name !== nextProps.applications[i].name) return false;
     }
-    
+
     return true;
-  }
+  },
 );
 
 MemoizedApplicationListSection.displayName = "MemoizedApplicationListSection";
@@ -257,15 +257,12 @@ interface VirtualizedListProps<T> {
  * Virtualized list component for handling large datasets
  * Only renders visible items to improve performance
  */
-export const VirtualizedList = memo<VirtualizedListProps<any>>(
+export const VirtualizedList = memo<VirtualizedListProps<unknown>>(
   ({ items, itemHeight, containerHeight, renderItem, overscan = 5 }) => {
     const [scrollTop, setScrollTop] = React.useState(0);
 
     const startIndex = Math.max(0, Math.floor(scrollTop / itemHeight) - overscan);
-    const endIndex = Math.min(
-      items.length - 1,
-      Math.ceil((scrollTop + containerHeight) / itemHeight) + overscan
-    );
+    const endIndex = Math.min(items.length - 1, Math.ceil((scrollTop + containerHeight) / itemHeight) + overscan);
 
     const visibleItems = items.slice(startIndex, endIndex + 1);
     const totalHeight = items.length * itemHeight;
@@ -279,21 +276,19 @@ export const VirtualizedList = memo<VirtualizedListProps<any>>(
       <div
         style={{
           height: containerHeight,
-          overflowY: 'auto',
+          overflowY: "auto",
         }}
         onScroll={handleScroll}
       >
-        <div style={{ height: totalHeight, position: 'relative' }}>
+        <div style={{ height: totalHeight, position: "relative" }}>
           <div
             style={{
-              position: 'absolute',
+              position: "absolute",
               top: offsetY,
-              width: '100%',
+              width: "100%",
             }}
           >
-            {visibleItems.map((item, index) =>
-              renderItem(item, startIndex + index)
-            )}
+            {visibleItems.map((item, index) => renderItem(item, startIndex + index))}
           </div>
         </div>
       </div>
@@ -306,7 +301,7 @@ export const VirtualizedList = memo<VirtualizedListProps<any>>(
       prevProps.containerHeight === nextProps.containerHeight &&
       shallowEqual(prevProps.items, nextProps.items)
     );
-  }
+  },
 );
 
 VirtualizedList.displayName = "VirtualizedList";

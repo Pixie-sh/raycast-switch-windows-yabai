@@ -9,16 +9,14 @@ import { useCallback, useRef, useMemo } from "react";
  * Create a stable callback that doesn't change on every render
  * Useful for preventing unnecessary re-renders in child components
  */
-export function useStableCallback<T extends (...args: any[]) => any>(
-  callback: T
-): T {
+export function useStableCallback<T extends (...args: unknown[]) => unknown>(callback: T): T {
   const callbackRef = useRef<T>();
   const stableCallback = useRef<T>();
 
   callbackRef.current = callback;
 
   if (!stableCallback.current) {
-    stableCallback.current = ((...args: any[]) => {
+    stableCallback.current = ((...args: unknown[]) => {
       return callbackRef.current?.(...args);
     }) as T;
   }
@@ -32,21 +30,21 @@ export function useStableCallback<T extends (...args: any[]) => any>(
  */
 export function arrayEquals<T>(a: T[], b: T[]): boolean {
   if (a.length !== b.length) return false;
-  
+
   for (let i = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return false;
   }
-  
+
   return true;
 }
 
 /**
  * Shallow comparison for objects
  */
-export function shallowEqual(a: any, b: any): boolean {
+export function shallowEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
-  
-  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') {
+
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") {
     return false;
   }
 
@@ -70,7 +68,7 @@ export function shallowEqual(a: any, b: any): boolean {
 export function useMemoWithComparison<T>(
   factory: () => T,
   deps: React.DependencyList,
-  isEqual: (a: React.DependencyList, b: React.DependencyList) => boolean = arrayEquals
+  isEqual: (a: React.DependencyList, b: React.DependencyList) => boolean = arrayEquals,
 ): T {
   const depsRef = useRef<React.DependencyList>();
   const valueRef = useRef<T>();
@@ -89,31 +87,33 @@ export function useMemoWithComparison<T>(
  */
 export function useBatchedState<T>(
   initialValue: T,
-  batchDelayMs: number = 16 // One frame at 60fps
+  batchDelayMs: number = 16, // One frame at 60fps
 ): [T, (value: T | ((prev: T) => T)) => void] {
   const [state, setState] = useState<T>(initialValue);
   const pendingUpdateRef = useRef<T | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const setBatchedState = useCallback((value: T | ((prev: T) => T)) => {
-    const newValue = typeof value === 'function' 
-      ? (value as (prev: T) => T)(pendingUpdateRef.current ?? state)
-      : value;
-    
-    pendingUpdateRef.current = newValue;
+  const setBatchedState = useCallback(
+    (value: T | ((prev: T) => T)) => {
+      const newValue =
+        typeof value === "function" ? (value as (prev: T) => T)(pendingUpdateRef.current ?? state) : value;
 
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-    }
+      pendingUpdateRef.current = newValue;
 
-    timeoutRef.current = setTimeout(() => {
-      if (pendingUpdateRef.current !== null) {
-        setState(pendingUpdateRef.current);
-        pendingUpdateRef.current = null;
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
       }
-      timeoutRef.current = null;
-    }, batchDelayMs);
-  }, [state, batchDelayMs]);
+
+      timeoutRef.current = setTimeout(() => {
+        if (pendingUpdateRef.current !== null) {
+          setState(pendingUpdateRef.current);
+          pendingUpdateRef.current = null;
+        }
+        timeoutRef.current = null;
+      }, batchDelayMs);
+    },
+    [state, batchDelayMs],
+  );
 
   return [state, setBatchedState];
 }
@@ -126,7 +126,7 @@ export function useVirtualization<T>({
   items,
   itemHeight,
   containerHeight,
-  overscan = 5
+  overscan = 5,
 }: {
   items: T[];
   itemHeight: number;
@@ -137,17 +137,14 @@ export function useVirtualization<T>({
 
   const visibleItems = useMemo(() => {
     const startIndex = Math.max(0, Math.floor(scrollTop / itemHeight) - overscan);
-    const endIndex = Math.min(
-      items.length - 1,
-      Math.ceil((scrollTop + containerHeight) / itemHeight) + overscan
-    );
+    const endIndex = Math.min(items.length - 1, Math.ceil((scrollTop + containerHeight) / itemHeight) + overscan);
 
     return {
       startIndex,
       endIndex,
       items: items.slice(startIndex, endIndex + 1),
       totalHeight: items.length * itemHeight,
-      offsetY: startIndex * itemHeight
+      offsetY: startIndex * itemHeight,
     };
   }, [items, itemHeight, containerHeight, scrollTop, overscan]);
 
@@ -157,24 +154,24 @@ export function useVirtualization<T>({
 
   return {
     ...visibleItems,
-    handleScroll
+    handleScroll,
   };
 }
 
 /**
  * Debounced callback hook that's stable and cancellable
  */
-export function useDebouncedCallback<T extends (...args: any[]) => any>(
+export function useDebouncedCallback<T extends (...args: unknown[]) => unknown>(
   callback: T,
-  delay: number
+  delay: number,
 ): [T, () => void] {
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const callbackRef = useRef(callback);
-  
+
   // Keep callback reference current
   callbackRef.current = callback;
 
-  const debouncedCallback = useStableCallback(((...args: any[]) => {
+  const debouncedCallback = useStableCallback(((...args: unknown[]) => {
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
     }
@@ -213,9 +210,9 @@ export function useRenderPerformance(componentName: string, deps?: React.Depende
     const renderTime = now - lastRenderTime.current;
 
     // Log performance in development
-    if (process.env.NODE_ENV === 'development') {
+    if (process.env.NODE_ENV === "development") {
       console.log(`${componentName} render #${renderCountRef.current} took ${renderTime.toFixed(2)}ms`);
-      
+
       // Warn about expensive renders
       if (renderTime > 16) {
         console.warn(`Slow render detected in ${componentName}: ${renderTime.toFixed(2)}ms`);
@@ -232,9 +229,9 @@ export function useRenderPerformance(componentName: string, deps?: React.Depende
 
   // Track dependency changes
   const depsRef = useRef<React.DependencyList>();
-  
+
   useEffect(() => {
-    if (depsRef.current && deps && process.env.NODE_ENV === 'development') {
+    if (depsRef.current && deps && process.env.NODE_ENV === "development") {
       const changedDeps = deps
         .map((dep, i) => [dep, depsRef.current?.[i], i] as const)
         .filter(([curr, prev]) => curr !== prev);
@@ -247,10 +244,10 @@ export function useRenderPerformance(componentName: string, deps?: React.Depende
   });
 
   return {
-    renderCount: renderCountRef.current
+    renderCount: renderCountRef.current,
   };
 }
 
 // Re-export React hooks for convenience
-import { useState, useEffect } from 'react';
+import { useState, useEffect } from "react";
 export { useState, useEffect };

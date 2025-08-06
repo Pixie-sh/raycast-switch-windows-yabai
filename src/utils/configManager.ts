@@ -52,8 +52,8 @@ const DEFAULT_CONFIG: AppConfig = {
     searchCacheTimeout: 30000,
     maxCacheSize: 50,
     workerEnabled: true,
-    performanceMonitoringEnabled: process.env.NODE_ENV === 'development',
-    debounceDelay: 30
+    performanceMonitoringEnabled: process.env.NODE_ENV === "development",
+    debounceDelay: 30,
   },
   features: {
     useSmartCache: true,
@@ -64,15 +64,15 @@ const DEFAULT_CONFIG: AppConfig = {
     useAsyncApplicationLoader: true,
     usePerformanceMonitoring: true,
     useVirtualizedLists: false, // Disabled by default - enable for large datasets
-    useMemoizedComponents: true
+    useMemoizedComponents: true,
   },
   errorRecovery: {
     maxRetries: 3,
     retryDelay: 1000,
     fallbackToSync: true,
     enableCrashReporting: false,
-    gracefulDegradation: true
-  }
+    gracefulDegradation: true,
+  },
 };
 
 class ConfigManager {
@@ -83,21 +83,21 @@ class ConfigManager {
     if (this.initialized) return;
 
     try {
-      const savedConfig = await storageManager.get<AppConfig>('app-config');
-      
+      const savedConfig = await storageManager.get<AppConfig>("app-config");
+
       if (savedConfig && savedConfig.version === DEFAULT_CONFIG.version) {
         // Merge saved config with defaults to handle new properties
         this.config = this.mergeConfigs(DEFAULT_CONFIG, savedConfig);
       } else {
         // Save default config
-        await storageManager.set('app-config', DEFAULT_CONFIG);
+        await storageManager.set("app-config", DEFAULT_CONFIG);
         this.config = DEFAULT_CONFIG;
       }
 
       this.initialized = true;
-      console.log('📋 Configuration loaded:', this.config);
+      console.log("📋 Configuration loaded:", this.config);
     } catch (error) {
-      console.error('Failed to load configuration, using defaults:', error);
+      console.error("Failed to load configuration, using defaults:", error);
       this.config = DEFAULT_CONFIG;
       this.initialized = true;
     }
@@ -109,19 +109,19 @@ class ConfigManager {
       performance: { ...defaultConfig.performance, ...savedConfig.performance },
       features: { ...defaultConfig.features, ...savedConfig.features },
       errorRecovery: { ...defaultConfig.errorRecovery, ...savedConfig.errorRecovery },
-      version: defaultConfig.version // Always use current version
+      version: defaultConfig.version, // Always use current version
     };
   }
 
   async updateConfig(updates: Partial<AppConfig>): Promise<void> {
     this.config = this.mergeConfigs(this.config, updates);
-    await storageManager.set('app-config', this.config);
-    console.log('📋 Configuration updated:', updates);
+    await storageManager.set("app-config", this.config);
+    console.log("📋 Configuration updated:", updates);
   }
 
   getConfig(): AppConfig {
     if (!this.initialized) {
-      console.warn('Configuration not initialized, using defaults');
+      console.warn("Configuration not initialized, using defaults");
       return DEFAULT_CONFIG;
     }
     return this.config;
@@ -141,8 +141,8 @@ class ConfigManager {
 
   async resetToDefaults(): Promise<void> {
     this.config = DEFAULT_CONFIG;
-    await storageManager.set('app-config', DEFAULT_CONFIG);
-    console.log('📋 Configuration reset to defaults');
+    await storageManager.set("app-config", DEFAULT_CONFIG);
+    console.log("📋 Configuration reset to defaults");
   }
 
   // Performance optimization based on system capabilities
@@ -150,32 +150,32 @@ class ConfigManager {
     const updates: Partial<AppConfig> = {};
 
     // Detect system capabilities and adjust settings
-    if (typeof Worker === 'undefined') {
+    if (typeof Worker === "undefined") {
       updates.features = { ...this.config.features, useBackgroundWorker: false };
-      console.log('🔧 Disabled web workers (not supported)');
+      console.log("🔧 Disabled web workers (not supported)");
     }
 
-    if (typeof performance.memory !== 'undefined') {
+    if (typeof performance.memory !== "undefined") {
       const memoryMB = performance.memory.usedJSHeapSize / 1024 / 1024;
-      
+
       if (memoryMB > 100) {
         // High memory usage - optimize for memory
         updates.performance = {
           ...this.config.performance,
           maxCacheSize: 25,
           cacheTimeout: 15000,
-          batchDelay: 1000
+          batchDelay: 1000,
         };
-        console.log('🔧 Optimized for high memory usage');
+        console.log("🔧 Optimized for high memory usage");
       } else if (memoryMB < 30) {
         // Low memory usage - optimize for performance
         updates.performance = {
           ...this.config.performance,
           maxCacheSize: 100,
           cacheTimeout: 60000,
-          batchDelay: 250
+          batchDelay: 250,
         };
-        console.log('🔧 Optimized for performance');
+        console.log("🔧 Optimized for performance");
       }
     }
 
@@ -188,7 +188,7 @@ class ConfigManager {
   shouldUseFeature(feature: keyof FeatureFlags, fallback: boolean = false): boolean {
     try {
       return this.isFeatureEnabled(feature);
-    } catch (error) {
+    } catch {
       console.warn(`Error checking feature ${feature}, using fallback:`, fallback);
       return fallback;
     }
@@ -198,16 +198,12 @@ class ConfigManager {
 // Error recovery utilities
 export class ErrorRecoveryManager {
   private retryAttempts = new Map<string, number>();
-  
+
   constructor(private configManager: ConfigManager) {}
 
-  async withRetry<T>(
-    operation: () => Promise<T>,
-    operationId: string,
-    fallback?: () => T | Promise<T>
-  ): Promise<T> {
-    const config = this.configManager.getErrorRecoverySetting('maxRetries');
-    const retryDelay = this.configManager.getErrorRecoverySetting('retryDelay');
+  async withRetry<T>(operation: () => Promise<T>, operationId: string, fallback?: () => T | Promise<T>): Promise<T> {
+    const config = this.configManager.getErrorRecoverySetting("maxRetries");
+    const retryDelay = this.configManager.getErrorRecoverySetting("retryDelay");
     const currentAttempts = this.retryAttempts.get(operationId) || 0;
 
     try {
@@ -222,15 +218,15 @@ export class ErrorRecoveryManager {
         // Retry with exponential backoff
         this.retryAttempts.set(operationId, currentAttempts + 1);
         const delay = retryDelay * Math.pow(2, currentAttempts);
-        
+
         console.log(`Retrying ${operationId} in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        
+        await new Promise((resolve) => setTimeout(resolve, delay));
+
         return this.withRetry(operation, operationId, fallback);
       } else {
         // Max retries reached - use fallback or throw
         this.retryAttempts.delete(operationId);
-        
+
         if (fallback) {
           console.log(`Using fallback for ${operationId}`);
           return await fallback();
@@ -242,35 +238,28 @@ export class ErrorRecoveryManager {
   }
 
   reportError(error: Error, context: string): void {
-    const enableReporting = this.configManager.getErrorRecoverySetting('enableCrashReporting');
-    
+    const enableReporting = this.configManager.getErrorRecoverySetting("enableCrashReporting");
+
     if (enableReporting) {
       console.error(`🚨 Error in ${context}:`, {
         message: error.message,
         stack: error.stack,
         timestamp: new Date().toISOString(),
-        context
+        context,
       });
     }
   }
 
   shouldFallbackToSync(error: Error): boolean {
-    const fallbackEnabled = this.configManager.getErrorRecoverySetting('fallbackToSync');
-    const gracefulDegradation = this.configManager.getErrorRecoverySetting('gracefulDegradation');
+    const fallbackEnabled = this.configManager.getErrorRecoverySetting("fallbackToSync");
+    const gracefulDegradation = this.configManager.getErrorRecoverySetting("gracefulDegradation");
 
     if (!fallbackEnabled) return false;
 
     // Check for specific error types that warrant sync fallback
-    const syncFallbackErrors = [
-      'Worker error',
-      'Promise timeout',
-      'Async operation failed',
-      'Network error'
-    ];
+    const syncFallbackErrors = ["Worker error", "Promise timeout", "Async operation failed", "Network error"];
 
-    return gracefulDegradation && syncFallbackErrors.some(errorType => 
-      error.message.includes(errorType)
-    );
+    return gracefulDegradation && syncFallbackErrors.some((errorType) => error.message.includes(errorType));
   }
 }
 
@@ -279,13 +268,13 @@ export const configManager = new ConfigManager();
 export const errorRecoveryManager = new ErrorRecoveryManager(configManager);
 
 // Initialize on module load
-configManager.initialize().catch(error => {
-  console.error('Failed to initialize config manager:', error);
+configManager.initialize().catch((error) => {
+  console.error("Failed to initialize config manager:", error);
 });
 
 // Auto-optimize for system after a delay
 setTimeout(() => {
-  configManager.optimizeForSystem().catch(error => {
-    console.error('Failed to optimize configuration for system:', error);
+  configManager.optimizeForSystem().catch((error) => {
+    console.error("Failed to optimize configuration for system:", error);
   });
 }, 5000);

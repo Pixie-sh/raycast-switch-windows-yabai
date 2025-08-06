@@ -457,7 +457,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         if (timeA !== timeB) {
           return timeB - timeA;
         }
-        
+
         // If no usage data, maintain yabai's natural order (by id)
         return a.id - b.id;
       });

@@ -23,7 +23,7 @@ interface SearchCache<T> {
 export class OptimizedSearch<T> {
   private fuse: Fuse<T> | null = null;
   private data: T[] = [];
-  private dataHash: string = '';
+  private dataHash: string = "";
   private cache = new Map<string, SearchCache<T>>();
   private readonly cacheTimeout: number;
   private readonly maxCacheSize: number;
@@ -31,7 +31,7 @@ export class OptimizedSearch<T> {
   constructor(
     private readonly fuseOptions: Fuse.IFuseOptions<T>,
     cacheTimeoutMs: number = 30000, // 30 seconds
-    maxCacheSize: number = 50
+    maxCacheSize: number = 50,
   ) {
     this.cacheTimeout = cacheTimeoutMs;
     this.maxCacheSize = maxCacheSize;
@@ -42,17 +42,17 @@ export class OptimizedSearch<T> {
    */
   updateData(newData: T[]): void {
     const newDataHash = this.calculateDataHash(newData);
-    
+
     // Only rebuild if data actually changed
     if (newDataHash !== this.dataHash) {
-      performanceMonitor.measure('search-data-update', () => {
+      performanceMonitor.measure("search-data-update", () => {
         this.data = newData;
         this.dataHash = newDataHash;
         this.fuse = newData.length > 0 ? new Fuse(newData, this.fuseOptions) : null;
-        
+
         // Clear cache when data changes
         this.cache.clear();
-        
+
         console.log(`🔍 Updated search data with ${newData.length} items`);
       });
     }
@@ -67,37 +67,37 @@ export class OptimizedSearch<T> {
         items: limit ? this.data.slice(0, limit) : this.data,
         totalCount: this.data.length,
         searchTime: 0,
-        cacheHit: false
+        cacheHit: false,
       };
     }
 
     // Check cache first
-    const cacheKey = `${query.toLowerCase()}:${limit || 'all'}`;
+    const cacheKey = `${query.toLowerCase()}:${limit || "all"}`;
     const cached = this.getCachedResult(cacheKey);
     if (cached) {
-      performanceMonitor.recordMetric('search-cache-hit', 0);
+      performanceMonitor.recordMetric("search-cache-hit", 0);
       return {
         items: cached.results,
         totalCount: cached.results.length,
         searchTime: 0,
-        cacheHit: true
+        cacheHit: true,
       };
     }
 
     // Perform search
-    return performanceMonitor.measure('search-operation', () => {
+    return performanceMonitor.measure("search-operation", () => {
       let results: T[] = [];
 
       if (this.fuse) {
         // Try exact matches first for better performance
         const exactMatches = this.findExactMatches(query);
-        
+
         if (exactMatches.length > 0) {
           results = exactMatches;
         } else {
           // Fall back to fuzzy search
           const fuseResults = this.fuse.search(query, { limit });
-          results = fuseResults.map(result => result.item);
+          results = fuseResults.map((result) => result.item);
         }
       }
 
@@ -111,7 +111,7 @@ export class OptimizedSearch<T> {
         items: limitedResults,
         totalCount: results.length,
         searchTime: 0, // Will be filled by performance monitor
-        cacheHit: false
+        cacheHit: false,
       };
     });
   }
@@ -129,10 +129,10 @@ export class OptimizedSearch<T> {
 
       if (this.fuseOptions.keys) {
         for (const keyConfig of this.fuseOptions.keys) {
-          const key = typeof keyConfig === 'string' ? keyConfig : keyConfig.name;
+          const key = typeof keyConfig === "string" ? keyConfig : keyConfig.name;
           const value = this.getNestedValue(item, key);
-          
-          if (typeof value === 'string' && value.toLowerCase().includes(lowerQuery)) {
+
+          if (typeof value === "string" && value.toLowerCase().includes(lowerQuery)) {
             isMatch = true;
             break;
           }
@@ -150,8 +150,8 @@ export class OptimizedSearch<T> {
   /**
    * Get nested value from object using dot notation
    */
-  private getNestedValue(obj: any, path: string): any {
-    return path.split('.').reduce((current, key) => current?.[key], obj);
+  private getNestedValue(obj: unknown, path: string): unknown {
+    return path.split(".").reduce((current, key) => current?.[key], obj);
   }
 
   /**
@@ -159,11 +159,11 @@ export class OptimizedSearch<T> {
    */
   private calculateDataHash(data: T[]): string {
     // Simple hash based on data length and first/last items
-    if (data.length === 0) return '0';
-    
+    if (data.length === 0) return "0";
+
     const first = data[0];
     const last = data[data.length - 1];
-    
+
     return `${data.length}-${JSON.stringify(first).slice(0, 50)}-${JSON.stringify(last).slice(0, 50)}`;
   }
 
@@ -172,12 +172,12 @@ export class OptimizedSearch<T> {
    */
   private getCachedResult(cacheKey: string): SearchCache<T> | null {
     const cached = this.cache.get(cacheKey);
-    
+
     if (cached) {
       // Check if cache is still valid
       const age = Date.now() - cached.timestamp;
       const isValid = age < this.cacheTimeout && cached.dataHash === this.dataHash;
-      
+
       if (isValid) {
         return cached;
       } else {
@@ -185,7 +185,7 @@ export class OptimizedSearch<T> {
         this.cache.delete(cacheKey);
       }
     }
-    
+
     return null;
   }
 
@@ -206,7 +206,7 @@ export class OptimizedSearch<T> {
       query: cacheKey,
       results,
       timestamp: Date.now(),
-      dataHash: this.dataHash
+      dataHash: this.dataHash,
     });
   }
 
@@ -249,7 +249,7 @@ export class OptimizedSearch<T> {
 export function createOptimizedSearch<T>(
   fuseOptions: Fuse.IFuseOptions<T>,
   cacheTimeoutMs?: number,
-  maxCacheSize?: number
+  maxCacheSize?: number,
 ): OptimizedSearch<T> {
   return new OptimizedSearch(fuseOptions, cacheTimeoutMs, maxCacheSize);
 }

@@ -26,21 +26,18 @@ class YabaiQueryManager {
   private readonly CACHE_TTL_MS = 2000; // 2 seconds
 
   async queryWindows(): Promise<YabaiWindow[]> {
-    return this.performQuery('windows', "-m query --windows");
+    return this.performQuery("windows", "-m query --windows");
   }
 
   async querySpaces(): Promise<YabaiSpace[]> {
-    return this.performQuery('spaces', "-m query --spaces");
+    return this.performQuery("spaces", "-m query --spaces");
   }
 
   async queryDisplays(): Promise<YabaiDisplay[]> {
-    return this.performQuery('displays', "-m query --displays");
+    return this.performQuery("displays", "-m query --displays");
   }
 
-  private async performQuery<T>(
-    type: keyof typeof this.cache,
-    command: string
-  ): Promise<T> {
+  private async performQuery<T>(type: keyof typeof this.cache, command: string): Promise<T> {
     const cacheEntry = this.cache[type];
 
     if (cacheEntry.inFlight) {
@@ -72,7 +69,7 @@ class YabaiQueryManager {
       }
     });
 
-    cacheEntry.inFlight = promise as Promise<any>;
+    cacheEntry.inFlight = promise as Promise<unknown>;
     return promise;
   }
 
@@ -80,10 +77,9 @@ class YabaiQueryManager {
     if (type) {
       this.cache[type].timestamp = 0;
     } else {
-      Object.values(this.cache).forEach(entry => (entry.timestamp = 0));
+      Object.values(this.cache).forEach((entry) => (entry.timestamp = 0));
     }
   }
 }
 
 export const yabaiQueryManager = new YabaiQueryManager();
-

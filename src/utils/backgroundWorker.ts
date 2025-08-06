@@ -5,25 +5,25 @@
 
 interface WorkerMessage {
   id: string;
-  type: 'sort' | 'filter' | 'search';
-  payload: any;
+  type: "sort" | "filter" | "search";
+  payload: unknown;
 }
 
 interface WorkerResponse {
   id: string;
-  result?: any;
+  result?: unknown;
   error?: string;
 }
 
 class BackgroundWorkerManager {
   private worker: Worker | null = null;
   private isSupported: boolean;
-  private pendingTasks = new Map<string, { resolve: Function; reject: Function }>();
+  private pendingTasks = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
   private taskId = 0;
 
   constructor() {
-    this.isSupported = typeof Worker !== 'undefined';
-    
+    this.isSupported = typeof Worker !== "undefined";
+
     if (this.isSupported) {
       this.initializeWorker();
     }
@@ -119,15 +119,15 @@ class BackgroundWorkerManager {
       });
     `;
 
-    const blob = new Blob([workerScript], { type: 'application/javascript' });
+    const blob = new Blob([workerScript], { type: "application/javascript" });
     const workerUrl = URL.createObjectURL(blob);
-    
+
     try {
       this.worker = new Worker(workerUrl);
-      this.worker.addEventListener('message', this.handleWorkerMessage.bind(this));
-      this.worker.addEventListener('error', this.handleWorkerError.bind(this));
+      this.worker.addEventListener("message", this.handleWorkerMessage.bind(this));
+      this.worker.addEventListener("error", this.handleWorkerError.bind(this));
     } catch (error) {
-      console.warn('Failed to create web worker:', error);
+      console.warn("Failed to create web worker:", error);
       this.isSupported = false;
     } finally {
       URL.revokeObjectURL(workerUrl);
@@ -137,10 +137,10 @@ class BackgroundWorkerManager {
   private handleWorkerMessage(event: MessageEvent<WorkerResponse>) {
     const { id, result, error } = event.data;
     const task = this.pendingTasks.get(id);
-    
+
     if (task) {
       this.pendingTasks.delete(id);
-      
+
       if (error) {
         task.reject(new Error(error));
       } else {
@@ -150,11 +150,11 @@ class BackgroundWorkerManager {
   }
 
   private handleWorkerError(error: ErrorEvent) {
-    console.error('Worker error:', error);
-    
+    console.error("Worker error:", error);
+
     // Reject all pending tasks
     for (const [id, task] of this.pendingTasks) {
-      task.reject(new Error('Worker error occurred'));
+      task.reject(new Error("Worker error occurred"));
       this.pendingTasks.delete(id);
     }
   }
@@ -163,101 +163,91 @@ class BackgroundWorkerManager {
     return `task_${++this.taskId}_${Date.now()}`;
   }
 
-  async sortInBackground<T>(
-    items: T[],
-    compareFn: (a: T, b: T) => number
-  ): Promise<T[]> {
+  async sortInBackground<T>(items: T[], compareFn: (a: T, b: T) => number): Promise<T[]> {
     if (!this.isSupported || !this.worker) {
       // Fallback to main thread
       return [...items].sort(compareFn);
     }
 
     const id = this.generateTaskId();
-    
+
     return new Promise((resolve, reject) => {
       this.pendingTasks.set(id, { resolve, reject });
-      
+
       // Serialize the comparison function
       const compareFnString = compareFn.toString();
-      
+
       this.worker!.postMessage({
         id,
-        type: 'sort',
-        payload: { items, compareFn: compareFnString }
+        type: "sort",
+        payload: { items, compareFn: compareFnString },
       } as WorkerMessage);
-      
+
       // Timeout after 10 seconds
       setTimeout(() => {
         if (this.pendingTasks.has(id)) {
           this.pendingTasks.delete(id);
-          reject(new Error('Worker task timeout'));
+          reject(new Error("Worker task timeout"));
         }
       }, 10000);
     });
   }
 
-  async filterInBackground<T>(
-    items: T[],
-    predicate: (item: T) => boolean
-  ): Promise<T[]> {
+  async filterInBackground<T>(items: T[], predicate: (item: T) => boolean): Promise<T[]> {
     if (!this.isSupported || !this.worker) {
       return items.filter(predicate);
     }
 
     const id = this.generateTaskId();
-    
+
     return new Promise((resolve, reject) => {
       this.pendingTasks.set(id, { resolve, reject });
-      
+
       const predicateString = predicate.toString();
-      
+
       this.worker!.postMessage({
         id,
-        type: 'filter',
-        payload: { items, predicate: predicateString }
+        type: "filter",
+        payload: { items, predicate: predicateString },
       } as WorkerMessage);
-      
+
       setTimeout(() => {
         if (this.pendingTasks.has(id)) {
           this.pendingTasks.delete(id);
-          reject(new Error('Worker task timeout'));
+          reject(new Error("Worker task timeout"));
         }
       }, 10000);
     });
   }
 
-  async searchInBackground<T>(
-    items: T[],
-    query: string,
-    options: { fields?: string[] } = {}
-  ): Promise<T[]> {
+  async searchInBackground<T>(items: T[], query: string, options: { fields?: string[] } = {}): Promise<T[]> {
     if (!this.isSupported || !this.worker) {
       const lowerQuery = query.toLowerCase();
-      const searchFields = options.fields || ['title', 'name', 'app'];
-      
-      return items.filter(item => {
-        return searchFields.some(field => {
-          const value = (item as any)[field];
+      const searchFields = options.fields || ["title", "name", "app"];
+
+      return items.filter((item) => {
+        return searchFields.some((field) => {
+          const value = (item as Record<string, unknown>)[field];
           return value && value.toLowerCase().includes(lowerQuery);
         });
       });
     }
 
     const id = this.generateTaskId();
-    
+
     return new Promise((resolve, reject) => {
       this.pendingTasks.set(id, { resolve, reject });
-      
+
       this.worker!.postMessage({
         id,
-        type: 'search',
-        payload: { items, query, options }
+        type: "search",
+        payload: { items, query, options },
       } as WorkerMessage);
-      
+
       setTimeout(() => {
         if (this.pendingTasks.has(id)) {
           this.pendingTasks.delete(id);
-          reject(new Error('Worker task timeout'));
+          reject(new Error("Worker task timeout"));
         }
       }, 10000);
     });
@@ -268,10 +258,10 @@ class BackgroundWorkerManager {
       this.worker.terminate();
       this.worker = null;
     }
-    
+
     // Reject all pending tasks
     for (const [id, task] of this.pendingTasks) {
-      task.reject(new Error('Worker terminated'));
+      task.reject(new Error("Worker terminated"));
       this.pendingTasks.delete(id);
     }
   }
@@ -280,7 +270,7 @@ class BackgroundWorkerManager {
     return {
       isSupported: this.isSupported,
       isActive: !!this.worker,
-      pendingTasks: this.pendingTasks.size
+      pendingTasks: this.pendingTasks.size,
     };
   }
 }
@@ -289,8 +279,8 @@ class BackgroundWorkerManager {
 export const backgroundWorker = new BackgroundWorkerManager();
 
 // Cleanup on page unload
-if (typeof window !== 'undefined') {
-  window.addEventListener('beforeunload', () => {
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
     backgroundWorker.terminate();
   });
 }
