@@ -13,3 +13,6 @@ compiled_raycast_swift
 .DS_Store
 .idea
 /.guidelines
+
+# Development documentation
+/.warp
