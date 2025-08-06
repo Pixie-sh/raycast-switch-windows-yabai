@@ -10,6 +10,12 @@ import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { exec } from "node:child_process";
 
+// Performance optimization imports
+import { performanceMonitor } from "./utils/performanceMonitor";
+import { storageManager } from "./utils/batchedStorage";
+import { asyncApplicationLoader } from "./utils/asyncApplicationLoader";
+import { createOptimizedSearch } from "./utils/optimizedSearch";
+
 // Function to list applications from standard directories
 function listApplications(): Application[] {
   const applications: Application[] = [];
@@ -97,16 +103,16 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   }, []);
 
   const refreshApplications = useCallback(async () => {
-    try {
-      const freshApps = listApplications();
-      setApplications(freshApps);
-
-      // Update the cache
-      await LocalStorage.setItem("cachedApplications", JSON.stringify(freshApps));
-      console.log("Updated applications cache");
-    } catch (error) {
-      console.error("Error refreshing applications:", error);
-    }
+    return performanceMonitor.measureAsync('app-refresh', async () => {
+      try {
+        // Use async loader instead of sync listApplications
+        const freshApps = await asyncApplicationLoader.loadApplications(true);
+        setApplications(freshApps);
+        console.log("Updated applications cache");
+      } catch (error) {
+        console.error("Error refreshing applications:", error);
+      }
+    });
   }, []);
 
   // Function to refresh windows data
@@ -152,53 +158,53 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     }
   }, [refreshWindows, refreshApplications]);
 
-  // Load previous usage times, sort method, and focus history from local storage when the component mounts.
+  // Load previous usage times, sort method, and focus history from optimized storage when the component mounts.
   useEffect(() => {
+    performanceMonitor.startTimer('initial-load');
+    
     (async () => {
-      const storedTimes = await LocalStorage.getItem<string>("usageTimes");
-      if (storedTimes) {
-        try {
-          setUsageTimes(JSON.parse(storedTimes));
-        } catch (e) {
-          console.error("error setting stored times;", e);
-        }
-      }
+      try {
+        // Load data using optimized storage manager
+        const [storedTimes, storedSortMethod, storedFocusHistory] = await Promise.all([
+          storageManager.get<Record<string, number>>("usageTimes"),
+          storageManager.get<SortMethod>("sortMethod"),
+          storageManager.get<{ current: number | null; previous: number | null }>("focusHistory")
+        ]);
 
-      const storedSortMethod = await LocalStorage.getItem<string>("sortMethod");
-      if (storedSortMethod) {
-        try {
-          const parsedSortMethod = JSON.parse(storedSortMethod);
-          setSortMethod(parsedSortMethod as SortMethod);
-        } catch {
-          setSortMethod(SortMethod.USAGE);
+        if (storedTimes) {
+          setUsageTimes(storedTimes);
         }
-      }
 
-      const storedFocusHistory = await LocalStorage.getItem<string>("focusHistory");
-      if (storedFocusHistory) {
-        try {
-          const parsedFocusHistory = JSON.parse(storedFocusHistory);
-          setFocusHistory(parsedFocusHistory);
-        } catch (e) {
-          console.error("error setting stored focus history;", e);
+        if (storedSortMethod) {
+          setSortMethod(storedSortMethod);
+        } else {
+          setSortMethod(SortMethod.RECENTLY_USED);
         }
+
+        if (storedFocusHistory) {
+          setFocusHistory(storedFocusHistory);
+        }
+      } catch (error) {
+        console.error("Error loading initial data:", error);
       }
+      
+      performanceMonitor.endTimer('initial-load');
     })();
   }, []);
 
-  // Persist usage times in local storage when they change.
+  // Persist usage times in local storage when they change (batched).
   useEffect(() => {
-    LocalStorage.setItem("usageTimes", JSON.stringify(usageTimes));
+    storageManager.set("usageTimes", usageTimes);
   }, [usageTimes]);
 
-  // Persist sort method in local storage when it changes.
+  // Persist sort method in local storage when it changes (batched).
   useEffect(() => {
-    LocalStorage.setItem("sortMethod", JSON.stringify(sortMethod));
+    storageManager.set("sortMethod", sortMethod);
   }, [sortMethod]);
 
-  // Persist focus history in local storage when it changes.
+  // Persist focus history in local storage when it changes (batched).
   useEffect(() => {
-    LocalStorage.setItem("focusHistory", JSON.stringify(focusHistory));
+    storageManager.set("focusHistory", focusHistory);
   }, [focusHistory]);
 
   // Query windows using useExec.
@@ -290,23 +296,18 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     };
   }, [props.launchContext, lastRefreshTime, refreshAllData]);
 
-  // Load applications when the component mounts
+  // Load applications when the component mounts using async loader
   useEffect(() => {
     const loadApplications = async () => {
-      // Try to load from cache first
-      const cachedApps = await LocalStorage.getItem<string>("cachedApplications");
-      if (cachedApps) {
-        try {
-          const parsedApps = JSON.parse(cachedApps);
-          setApplications(parsedApps);
-          console.log("Loaded applications from cache");
-        } catch (error) {
-          console.error("Error parsing cached applications:", error);
-        }
+      try {
+        // Use the async application loader with caching
+        const apps = await asyncApplicationLoader.loadApplications();
+        setApplications(apps);
+      } catch (error) {
+        console.error("Error loading applications with async loader:", error);
+        // Fallback to refreshApplications if async loader fails
+        await refreshApplications();
       }
-
-      // Then refresh the applications list
-      await refreshApplications();
     };
 
     loadApplications();
@@ -477,6 +478,21 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   const firstWindow = useMemo(() => {
     return sortedWindows.length > 0 ? sortedWindows[0] : undefined;
   }, [sortedWindows]);
+
+  // Cleanup and performance summary on unmount
+  useEffect(() => {
+    return () => {
+      // Flush any pending storage operations
+      storageManager.flush().catch(err => 
+        console.error('Error flushing storage on unmount:', err)
+      );
+      
+      // Log performance summary in development
+      if (process.env.NODE_ENV === 'development') {
+        performanceMonitor.logSummary();
+      }
+    };
+  }, []);
 
   return (
     <List
