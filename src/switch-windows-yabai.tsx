@@ -10,18 +10,6 @@ import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { exec } from "node:child_process";
 
-// Performance optimization imports
-import { performanceMonitor } from "./utils/performanceMonitor";
-import { storageManager } from "./utils/batchedStorage";
-import { asyncApplicationLoader } from "./utils/asyncApplicationLoader";
-import { createOptimizedSearch } from "./utils/optimizedSearch";
-import { yabaiQueryManager } from "./utils/yabaiQueryManager";
-import { useStableCallback, useRenderPerformance, useMemoWithComparison } from "./utils/reactOptimizations";
-import { backgroundWorker } from "./utils/backgroundWorker";
-import { MemoizedWindowListSection, MemoizedApplicationListSection } from "./components/MemoizedComponents";
-import { configManager, errorRecoveryManager } from "./utils/configManager";
-import { performanceAnalytics } from "./utils/performanceAnalytics";
-
 // Function to list applications from standard directories
 function listApplications(): Application[] {
   const applications: Application[] = [];
@@ -72,13 +60,9 @@ function useDebounce<T>(value: T, delay: number): T {
 }
 
 export default function Command(props: { launchContext?: { launchType: LaunchType } }) {
-  // Initialize utilities and config first
-  performanceAnalytics.startSession();
-  const { performance: performanceConfig, featureFlags, errorRecovery } = configManager.getConfig();
-
   const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});
   const [inputText, setInputText] = useState("");
-  const searchText = useDebounce(inputText, performanceConfig.debounceDelay || 30); // Use config for debounce delay
+  const searchText = useDebounce(inputText, 30); // Reduced debounce delay for better responsiveness
   const [windows, setWindows] = useState<YabaiWindow[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
   const [sortMethod, setSortMethod] = useState<SortMethod>(SortMethod.RECENTLY_USED);
@@ -91,9 +75,6 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     current: number | null;
     previous: number | null;
   }>({ current: null, previous: null });
-
-  // Performance monitoring for this component
-  useRenderPerformance('SwitchWindowsCommand', [windows, applications]);
 
   // Function to remove a window from the local listing after it's closed.
   const removeWindow = useCallback((id: number) => {
@@ -116,54 +97,50 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   }, []);
 
   const refreshApplications = useCallback(async () => {
-    if (!featureFlags.applicationLoading) return;
+    try {
+      const freshApps = listApplications();
+      setApplications(freshApps);
 
-    return performanceMonitor.measureAsync('app-refresh', async () => {
-      try {
-        const freshApps = await errorRecoveryManager.withRetries(
-          () => asyncApplicationLoader.loadApplications(true),
-          'load-applications'
-        );
-        setApplications(freshApps);
-        performanceAnalytics.logMetric('app-refresh', 'success');
-      } catch (error) {
-        errorRecoveryManager.reportError(error, 'app-refresh');
-        performanceAnalytics.logMetric('app-refresh', 'failure');
-      }
-    });
-  }, [featureFlags.applicationLoading]);
+      // Update the cache
+      await LocalStorage.setItem("cachedApplications", JSON.stringify(freshApps));
+      console.log("Updated applications cache");
+    } catch (error) {
+      console.error("Error refreshing applications:", error);
+    }
+  }, []);
 
-  // Function to refresh windows data using centralized query manager
+  // Function to refresh windows data
   const refreshWindows = useCallback(async () => {
-    if (!featureFlags.yabaiIntegration) return;
+    setIsRefreshing(true);
+    try {
+      const { stdout } = await exec(`${YABAI} -m query --windows`, { env: ENV });
+      if (stdout) {
+        // Ensure stdout is a string before parsing
+        const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+        try {
+          const parsed = JSON.parse(stdoutStr);
+          const windowsData = Array.isArray(parsed) ? parsed : [];
+          setWindows(windowsData);
+          updateFocusHistory(windowsData);
 
-    return performanceMonitor.measureAsync('windows-refresh', async () => {
-      setIsRefreshing(true);
-      try {
-        const windowsData = await errorRecoveryManager.withRetries(
-          () => yabaiQueryManager.queryWindows(),
-          'query-windows'
-        );
-        setWindows(windowsData);
-        updateFocusHistory(windowsData);
-
-        if (featureFlags.caching) {
+          // Update cache with timestamp
           const cacheData = {
             windows: windowsData,
             timestamp: Date.now(),
           };
-          storageManager.set("cachedWindows", cacheData);
+          await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
+          setLastRefreshTime(Date.now());
+          console.log("Updated windows cache");
+        } catch (parseError) {
+          console.error("Error parsing windows data:", parseError, "Raw data:", stdoutStr);
         }
-        setLastRefreshTime(Date.now());
-        performanceAnalytics.logMetric('windows-refresh', 'success');
-      } catch (error) {
-        errorRecoveryManager.reportError(error, 'windows-refresh');
-        performanceAnalytics.logMetric('windows-refresh', 'failure');
-      } finally {
-        setIsRefreshing(false);
       }
-    });
-  }, [updateFocusHistory, featureFlags.yabaiIntegration, featureFlags.caching]);
+    } catch (error) {
+      console.error("Error refreshing windows:", error);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
 
   // Function to refresh all data
   const refreshAllData = useCallback(async () => {
@@ -175,61 +152,54 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     }
   }, [refreshWindows, refreshApplications]);
 
-  // Load previous usage times, sort method, and focus history from optimized storage when the component mounts.
+  // Load previous usage times, sort method, and focus history from local storage when the component mounts.
   useEffect(() => {
-    performanceMonitor.startTimer('initial-load');
-    
     (async () => {
-      try {
-        // Load data using optimized storage manager
-        const [storedTimes, storedSortMethod, storedFocusHistory] = await Promise.all([
-          featureFlags.caching ? storageManager.get<Record<string, number>>("usageTimes") : Promise.resolve(undefined),
-          featureFlags.caching ? storageManager.get<SortMethod>("sortMethod") : Promise.resolve(undefined),
-          featureFlags.caching ? storageManager.get<{ current: number | null; previous: number | null }>("focusHistory") : Promise.resolve(undefined)
-        ]);
-
-        if (storedTimes) {
-          setUsageTimes(storedTimes);
+      const storedTimes = await LocalStorage.getItem<string>("usageTimes");
+      if (storedTimes) {
+        try {
+          setUsageTimes(JSON.parse(storedTimes));
+        } catch (e) {
+          console.error("error setting stored times;", e);
         }
-
-        if (storedSortMethod) {
-          setSortMethod(storedSortMethod);
-        } else {
-          setSortMethod(SortMethod.RECENTLY_USED);
-        }
-
-        if (storedFocusHistory) {
-          setFocusHistory(storedFocusHistory);
-        }
-      } catch (error) {
-        errorRecoveryManager.reportError(error, 'initial-load');
       }
-      
-      performanceMonitor.endTimer('initial-load');
-      performanceAnalytics.logMetric('initial-load', 'duration', performanceMonitor.getDuration('initial-load'));
+
+      const storedSortMethod = await LocalStorage.getItem<string>("sortMethod");
+      if (storedSortMethod) {
+        try {
+          const parsedSortMethod = JSON.parse(storedSortMethod);
+          setSortMethod(parsedSortMethod as SortMethod);
+        } catch {
+          setSortMethod(SortMethod.USAGE);
+        }
+      }
+
+      const storedFocusHistory = await LocalStorage.getItem<string>("focusHistory");
+      if (storedFocusHistory) {
+        try {
+          const parsedFocusHistory = JSON.parse(storedFocusHistory);
+          setFocusHistory(parsedFocusHistory);
+        } catch (e) {
+          console.error("error setting stored focus history;", e);
+        }
+      }
     })();
   }, []);
 
-  // Persist usage times in local storage when they change (batched).
+  // Persist usage times in local storage when they change.
   useEffect(() => {
-    if (featureFlags.caching) {
-      storageManager.set("usageTimes", usageTimes);
-    }
-  }, [usageTimes, featureFlags.caching]);
+    LocalStorage.setItem("usageTimes", JSON.stringify(usageTimes));
+  }, [usageTimes]);
 
-  // Persist sort method in local storage when it changes (batched).
+  // Persist sort method in local storage when it changes.
   useEffect(() => {
-    if (featureFlags.caching) {
-      storageManager.set("sortMethod", sortMethod);
-    }
-  }, [sortMethod, featureFlags.caching]);
+    LocalStorage.setItem("sortMethod", JSON.stringify(sortMethod));
+  }, [sortMethod]);
 
-  // Persist focus history in local storage when it changes (batched).
+  // Persist focus history in local storage when it changes.
   useEffect(() => {
-    if (featureFlags.caching) {
-      storageManager.set("focusHistory", focusHistory);
-    }
-  }, [focusHistory, featureFlags.caching]);
+    LocalStorage.setItem("focusHistory", JSON.stringify(focusHistory));
+  }, [focusHistory]);
 
   // Query windows using useExec.
   const { isLoading, data, error } = useExec<YabaiWindow[]>(YABAI, ["-m", "query", "--windows"], {
@@ -237,15 +207,12 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     parseOutput: ({ stdout }) => {
       if (!stdout) return [];
       try {
-        performanceMonitor.startTimer('parse-windows-data');
         // Ensure stdout is a string before parsing
         const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
         const parsed = JSON.parse(stdoutStr);
-        performanceMonitor.endTimer('parse-windows-data');
-        performanceAnalytics.logMetric('parse-windows-data', 'duration', performanceMonitor.getDuration('parse-windows-data'));
         return Array.isArray(parsed) ? parsed : [];
       } catch (parseError) {
-        errorRecoveryManager.reportError(parseError, 'parse-windows-data');
+        console.error("Error parsing windows data in useExec:", parseError);
         return [];
       }
     },
@@ -256,7 +223,6 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   useEffect(() => {
     // Load cached windows on mount
     const loadCachedWindows = async () => {
-      if (!featureFlags.caching) return;
       const cachedData = await LocalStorage.getItem<string>("cachedWindows");
       if (cachedData) {
         try {
@@ -265,10 +231,10 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
             setWindows(cachedWindows);
             updateFocusHistory(cachedWindows);
             setLastRefreshTime(timestamp);
-            performanceAnalytics.logMetric('load-cached-windows', 'success');
+            console.log("Loaded windows from cache, timestamp:", new Date(timestamp).toLocaleString());
           }
         } catch (error) {
-          errorRecoveryManager.reportError(error, 'load-cached-windows');
+          console.error("Error parsing cached windows:", error);
         }
       }
     };
@@ -281,15 +247,13 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       updateFocusHistory(data);
 
       // Update cache with timestamp
-      if (featureFlags.caching) {
-        const cacheData = {
-          windows: data,
-          timestamp: Date.now(),
-        };
-        LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
-      }
+      const cacheData = {
+        windows: data,
+        timestamp: Date.now(),
+      };
+      LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
       setLastRefreshTime(Date.now());
-      performanceAnalytics.logMetric('update-windows-cache', 'success');
+      console.log("Updated windows cache from useExec");
     } else if (!isLoading && !error && !data) {
       setWindows([]);
       updateFocusHistory([]);
@@ -306,21 +270,19 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     }
 
     // Check if data is stale (older than 5 minutes)
-    const isDataStale = Date.now() - lastRefreshTime > performanceConfig.cacheTTL;
+    const isDataStale = Date.now() - lastRefreshTime > 5 * 60 * 1000;
     if (isDataStale && lastRefreshTime > 0) {
       console.log("Data is stale, refreshing");
       refreshAllData();
     }
 
-    // Set up periodic refresh
+    // Set up periodic refresh (every 5 minutes)
     const refreshInterval = setInterval(
       () => {
-        if (featureFlags.backgroundRefresh) {
-          console.log("Periodic refresh");
-          refreshAllData();
-        }
+        console.log("Periodic refresh");
+        refreshAllData();
       },
-      performanceConfig.refreshInterval,
+      5 * 60 * 1000,
     );
 
     return () => {
@@ -328,22 +290,23 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     };
   }, [props.launchContext, lastRefreshTime, refreshAllData]);
 
-  // Load applications when the component mounts using async loader
+  // Load applications when the component mounts
   useEffect(() => {
     const loadApplications = async () => {
-      try {
-        // Use the async application loader with caching
-        const apps = await errorRecoveryManager.withRetries(
-          () => asyncApplicationLoader.loadApplications(),
-          'load-applications'
-        );
-        setApplications(apps);
-        performanceAnalytics.logMetric('load-applications', 'success');
-      } catch (error) {
-        errorRecoveryManager.reportError(error, 'load-applications-initial');
-        // Fallback to refreshApplications if async loader fails
-        await refreshApplications();
+      // Try to load from cache first
+      const cachedApps = await LocalStorage.getItem<string>("cachedApplications");
+      if (cachedApps) {
+        try {
+          const parsedApps = JSON.parse(cachedApps);
+          setApplications(parsedApps);
+          console.log("Loaded applications from cache");
+        } catch (error) {
+          console.error("Error parsing cached applications:", error);
+        }
       }
+
+      // Then refresh the applications list
+      await refreshApplications();
     };
 
     loadApplications();
@@ -425,11 +388,10 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
 
       // Otherwise use fuzzy search
       const results = fuse.search(searchText);
-      performanceAnalytics.logMetric('fuzzy-search-windows', 'result-count', results.length);
       setIsSearching(false); // Search is complete
       return results.map((result) => result.item);
     } catch (error) {
-      errorRecoveryManager.reportError(error, 'search-windows');
+      console.error("Error during search:", error);
       setIsSearching(false);
       return windows; // Fallback to all windows on error
     }
@@ -455,11 +417,10 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
 
       // Otherwise use fuzzy search
       const results = appFuse.search(searchText);
-      performanceAnalytics.logMetric('fuzzy-search-apps', 'result-count', results.length);
       setIsSearching(false); // Search is complete
       return results.map((result) => result.item);
     } catch (error) {
-      errorRecoveryManager.reportError(error, 'search-applications');
+      console.error("Error during application search:", error);
       setIsSearching(false);
       return applications; // Fallback to all applications on error
     }
@@ -477,30 +438,28 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         return timeB - timeA;
       });
     } else if (sortMethod === SortMethod.RECENTLY_USED) {
-      // Sort by recently used using usage times instead of focus history
-      // Get the two most recently used windows (by usage timestamp)
-      const recentlyUsedIds = Object.entries(usageTimes)
-        .sort(([, timeA], [, timeB]) => timeB - timeA)
-        .slice(0, 2)
-        .map(([id]) => parseInt(id));
-
-      // Find the corresponding windows
-      const previousWindow = recentlyUsedIds[1] ? windows.find((w) => w.id === recentlyUsedIds[1]) : null; // second most recent
-      const currentWindow = recentlyUsedIds[0] ? windows.find((w) => w.id === recentlyUsedIds[0]) : null;  // most recent
+      // Use actual yabai focus history (tracks ALL window focus changes, not just extension usage)
+      const currentWindow = focusHistory.current ? windows.find((w) => w.id === focusHistory.current) : null;
+      const previousWindow = focusHistory.previous ? windows.find((w) => w.id === focusHistory.previous) : null;
 
       return windows.sort((a, b) => {
-        // Previous window (second most recently used) comes first
+        // Previous window (from yabai focus history) comes first
         if (previousWindow && a.id === previousWindow.id) return -1;
         if (previousWindow && b.id === previousWindow.id) return 1;
 
-        // Current window (most recently used) comes second
+        // Current window (from yabai focus history) comes second
         if (currentWindow && a.id === currentWindow.id) return -1;
         if (currentWindow && b.id === currentWindow.id) return 1;
 
-        // For the rest (third position onwards), sort by usage time (most recent first)
+        // For the rest, sort by extension usage time (most recent first), then by yabai order
         const timeA = usageTimes[a.id] || 0;
         const timeB = usageTimes[b.id] || 0;
-        return timeB - timeA;
+        if (timeA !== timeB) {
+          return timeB - timeA;
+        }
+        
+        // If no usage data, maintain yabai's natural order (by id)
+        return a.id - b.id;
       });
     }
 
@@ -516,25 +475,6 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   const firstWindow = useMemo(() => {
     return sortedWindows.length > 0 ? sortedWindows[0] : undefined;
   }, [sortedWindows]);
-
-  // Cleanup and performance summary on unmount
-  useEffect(() => {
-    return () => {
-      // Flush any pending storage operations
-      storageManager.flush().catch(err => 
-        errorRecoveryManager.reportError(err, 'flush-storage-on-unmount')
-      );
-      
-      // Log performance summary in development
-      if (process.env.NODE_ENV === 'development') {
-        performanceMonitor.logSummary();
-        performanceAnalytics.generateReport().then(report => {
-          console.log("Performance Analytics Report:", report);
-        });
-      }
-      performanceAnalytics.endSession();
-    };
-  }, []);
 
   return (
     <List
