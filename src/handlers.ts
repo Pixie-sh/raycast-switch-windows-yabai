@@ -1,13 +1,13 @@
 import { promisify } from "node:util";
 import { exec, execFile } from "node:child_process";
 import { showToast, Toast } from "@raycast/api";
-import { ENV, YABAI, YabaiSpace, YabaiWindow } from "./models";
+import { ENV, YABAI, YabaiSpace, YabaiWindow, Application } from "./models";
 
 const execFilePromise = promisify(execFile);
 const execPromise = promisify(exec);
 
-// Focus a window.
-export const handleFocusWindow = (windowId: number, windowApp: string, onFocused: (id: number) => void) => {
+// Focus a window with intelligent fallback to application launch.
+export const handleFocusWindow = (windowId: number, windowApp: string, onFocused: (id: number) => void, applications: Application[] = []) => {
   return async () => {
     await showToast({ style: Toast.Style.Animated, title: "Focusing Window..." });
     try {
@@ -15,11 +15,40 @@ export const handleFocusWindow = (windowId: number, windowApp: string, onFocused
         env: ENV,
       });
       if (stderr?.trim()) {
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Yabai Error - Focus Window",
-          message: stderr.trim(),
-        });
+        console.log(`Yabai window focus stderr: ${stderr.trim()}`);
+        
+        // Check if the error indicates window doesn't exist
+        if (isWindowNotFoundError(stderr.trim()) || isApplicationNotRunningError(stderr.trim())) {
+          console.log(`Window ${windowId} not found, attempting to launch application ${windowApp}`);
+          
+          // Update toast to indicate switching to app launch
+          await showToast({ style: Toast.Style.Animated, title: `Launching ${windowApp}...` });
+          
+          try {
+            const strategy = await launchOrFocusApplication(windowApp, applications);
+            await showToast({
+              style: Toast.Style.Success,
+              title: `${windowApp} launched`,
+              message: `Used ${strategy} since no window was found`,
+            });
+            // Still call onFocused to update usage times, even though we launched instead of focused
+            onFocused(windowId);
+          } catch (launchError) {
+            console.error(`Failed to launch application ${windowApp}:`, launchError);
+            await showToast({
+              style: Toast.Style.Failure,
+              title: "Failed to Launch Application",
+              message: `Could not focus window or launch ${windowApp}: ${launchError instanceof Error ? launchError.message : 'Unknown error'}`,
+            });
+          }
+        } else {
+          // Other yabai errors that don't indicate missing window
+          await showToast({
+            style: Toast.Style.Failure,
+            title: "Yabai Error - Focus Window",
+            message: stderr.trim(),
+          });
+        }
       } else {
         await showToast({
           style: Toast.Style.Success,
@@ -28,11 +57,41 @@ export const handleFocusWindow = (windowId: number, windowApp: string, onFocused
         onFocused(windowId);
       }
     } catch (error: unknown) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: `Failed Window ${windowApp} (${windowId}) focus`,
-        message: error instanceof Error ? error.message : "Unknown error while focusing window",
-      });
+      const errorMessage = error instanceof Error ? error.message : "Unknown error while focusing window";
+      console.log(`Yabai window focus exception: ${errorMessage}`);
+      
+      // Check if the exception also indicates window doesn't exist
+      if (isWindowNotFoundError(errorMessage) || isApplicationNotRunningError(errorMessage)) {
+        console.log(`Exception indicates window ${windowId} not found, attempting to launch application ${windowApp}`);
+        
+        // Update toast to indicate switching to app launch
+        await showToast({ style: Toast.Style.Animated, title: `Launching ${windowApp}...` });
+        
+        try {
+          const strategy = await launchOrFocusApplication(windowApp, applications);
+          await showToast({
+            style: Toast.Style.Success,
+            title: `${windowApp} launched`,
+            message: `Used ${strategy} since no window was found`,
+          });
+          // Still call onFocused to update usage times, even though we launched instead of focused
+          onFocused(windowId);
+        } catch (launchError) {
+          console.error(`Failed to launch application ${windowApp}:`, launchError);
+          await showToast({
+            style: Toast.Style.Failure,
+            title: "Failed to Launch Application",
+            message: `Could not focus window or launch ${windowApp}: ${launchError instanceof Error ? launchError.message : 'Unknown error'}`,
+          });
+        }
+      } else {
+        // Other errors that don't indicate missing window
+        await showToast({
+          style: Toast.Style.Failure,
+          title: `Failed Window ${windowApp} (${windowId}) focus`,
+          message: errorMessage,
+        });
+      }
     }
   };
 };
@@ -446,3 +505,143 @@ export const handleMoveToDisplaySpace = (windowId: number, windowApp: string) =>
     }
   };
 };
+
+// Utility Functions for Application Management and Window Fallback
+
+/**
+ * Check if yabai error indicates window not found
+ */
+export function isWindowNotFoundError(error: string): boolean {
+  const windowNotFoundIndicators = [
+    "could not locate the window with the specified id",
+    "window not found",
+    "invalid window id",
+    "no such window",
+    "window does not exist",
+  ];
+  const errorLower = error.toLowerCase();
+  return windowNotFoundIndicators.some(indicator => errorLower.includes(indicator));
+}
+
+/**
+ * Check if yabai error indicates general application not found/not running
+ */
+export function isApplicationNotRunningError(error: string): boolean {
+  const appNotRunningIndicators = [
+    "application not running",
+    "no such application",
+    "app not found",
+    "application is not running",
+  ];
+  const errorLower = error.toLowerCase();
+  return appNotRunningIndicators.some(indicator => errorLower.includes(indicator));
+}
+
+/**
+ * Validate if a window still exists in yabai
+ */
+export async function validateWindowExists(windowId: number): Promise<boolean> {
+  try {
+    await execFilePromise(YABAI, ["-m", "query", "--windows", "--window", windowId.toString()], {
+      env: ENV,
+    });
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Get application path from applications list
+ */
+export function getApplicationPath(appName: string, applications: Application[]): string | null {
+  const app = applications.find(app => 
+    app.name.toLowerCase() === appName.toLowerCase() ||
+    app.name.toLowerCase().includes(appName.toLowerCase()) ||
+    appName.toLowerCase().includes(app.name.toLowerCase())
+  );
+  return app?.path || null;
+}
+
+/**
+ * Launch application using macOS open command
+ */
+export async function launchApplicationByName(appName: string): Promise<void> {
+  try {
+    // First try using the app name directly
+    await execPromise(`open -a "${appName}"`, { env: ENV });
+    console.log(`Successfully launched ${appName} using open -a`);
+  } catch (error) {
+    console.error(`Failed to launch ${appName} with open -a:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Launch application using full path
+ */
+export async function launchApplicationByPath(appPath: string): Promise<void> {
+  try {
+    await execPromise(`open "${appPath}"`, { env: ENV });
+    console.log(`Successfully launched app at ${appPath}`);
+  } catch (error) {
+    console.error(`Failed to launch app at ${appPath}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Focus application using AppleScript as fallback
+ */
+export async function focusApplicationWithAppleScript(appName: string): Promise<void> {
+  try {
+    const script = `tell application "${appName}" to activate`;
+    await execPromise(`osascript -e '${script}'`, { env: ENV });
+    console.log(`Successfully focused ${appName} using AppleScript`);
+  } catch (error) {
+    console.error(`Failed to focus ${appName} with AppleScript:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Comprehensive application launch/focus with multiple fallback strategies
+ */
+export async function launchOrFocusApplication(appName: string, applications: Application[]): Promise<string> {
+  const strategies: Array<{ name: string; action: () => Promise<void> }> = [
+    {
+      name: "open -a command",
+      action: () => launchApplicationByName(appName)
+    }
+  ];
+
+  // Add path-based launch if we have the path
+  const appPath = getApplicationPath(appName, applications);
+  if (appPath) {
+    strategies.push({
+      name: "path-based launch",
+      action: () => launchApplicationByPath(appPath)
+    });
+  }
+
+  // Add AppleScript as final fallback
+  strategies.push({
+    name: "AppleScript activation",
+    action: () => focusApplicationWithAppleScript(appName)
+  });
+
+  let lastError: Error | null = null;
+  
+  for (const strategy of strategies) {
+    try {
+      await strategy.action();
+      return strategy.name; // Return the successful strategy name
+    } catch (error) {
+      console.log(`Strategy '${strategy.name}' failed:`, error);
+      lastError = error instanceof Error ? error : new Error(String(error));
+      continue; // Try next strategy
+    }
+  }
+
+  throw lastError || new Error("All application launch strategies failed");
+}

@@ -520,6 +520,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
                   setSortMethod={setSortMethod}
                   onRefresh={refreshAllData}
                   isRefreshing={isRefreshing}
+                  applications={applications}
                 />
               }
             />
@@ -579,6 +580,7 @@ function WindowActions({
   onRefresh,
   isRefreshing,
   isFocused,
+  applications = [],
 }: {
   windowId: number;
   windowApp: string;
@@ -588,12 +590,13 @@ function WindowActions({
   onRefresh: () => void;
   isRefreshing: boolean;
   isFocused?: boolean;
+  applications?: Application[];
 }) {
   return (
     <ActionPanel>
       <Action
         title="Switch to Window"
-        onAction={isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused)}
+        onAction={isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused, applications)}
       />
       <Action
         title="Aggregate to Space"
