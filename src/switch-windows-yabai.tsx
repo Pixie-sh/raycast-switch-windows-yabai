@@ -317,18 +317,18 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     if (!Array.isArray(windows) || windows.length === 0) return null;
     return new Fuse(windows, {
       keys: [
-        { name: "title", weight: 2 }, // Give title higher weight
-        { name: "app", weight: 1 },
+        { name: "app", weight: 3 }, // Give app name highest weight
+        { name: "title", weight: 1 }, // Lower weight for title
       ],
       includeScore: true,
       threshold: 0.4, // Lower threshold for stricter matching
       ignoreLocation: true, // Search the entire string, not just from the beginning
       useExtendedSearch: true, // Enable extended search for more powerful queries
       sortFn: (a, b) => {
-        // Custom sort function to prioritize exact matches
+        // Custom sort function to prioritize app matches over title matches
         if (a.score === b.score) {
-          // If scores are equal, prioritize shorter matches (more precise)
-          return a.item.title.toString().length - b.item.title.toString().length;
+          // If scores are equal, prioritize shorter app names (more precise)
+          return a.item.app.toString().length - b.item.app.toString().length;
         }
         return a.score - b.score; // Lower score is better
       },
@@ -371,19 +371,37 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
 
     if (!fuse) return [];
 
-    // Use Fuse.js for fuzzy searching
+    // Use improved search logic with app name prioritization
     try {
-      // First try exact match on app name or title
-      const exactMatches = windows.filter(
-        (win) =>
-          win.app.toLowerCase().includes(searchText.toLowerCase()) ||
-          win.title.toLowerCase().includes(searchText.toLowerCase()),
+      const searchLower = searchText.toLowerCase();
+      
+      // First, get all windows that match in either app name or title
+      const appMatches = windows.filter(win => win.app.toLowerCase().includes(searchLower));
+      const titleMatches = windows.filter(win => 
+        win.title.toLowerCase().includes(searchLower) && 
+        !win.app.toLowerCase().includes(searchLower) // Exclude if already in app matches
       );
-
-      // If we have exact matches, prioritize them
-      if (exactMatches.length > 0) {
+      
+      // If we have matches, prioritize app name matches over title matches
+      if (appMatches.length > 0 || titleMatches.length > 0) {
         setIsSearching(false);
-        return exactMatches;
+        // Sort app matches by app name length (shorter = more precise)
+        const sortedAppMatches = appMatches.sort((a, b) => {
+          // Exact match comes first
+          const aExact = a.app.toLowerCase() === searchLower;
+          const bExact = b.app.toLowerCase() === searchLower;
+          if (aExact && !bExact) return -1;
+          if (!aExact && bExact) return 1;
+          
+          // Then by app name length
+          return a.app.length - b.app.length;
+        });
+        
+        // Sort title matches by title length
+        const sortedTitleMatches = titleMatches.sort((a, b) => a.title.length - b.title.length);
+        
+        // Return app matches first, then title matches
+        return [...sortedAppMatches, ...sortedTitleMatches];
       }
 
       // Otherwise use fuzzy search
