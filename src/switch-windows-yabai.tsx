@@ -526,7 +526,10 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
               icon={getAppIcon(win, applications)}
               title={win.app}
               subtitle={win.title}
-              accessories={win["has-focus"] || win.focused ? [{ text: "focused" }] : []}
+              accessories={[
+                { tag: { value: `#${win.display || "?"}`, color: getDisplayColor(win.display) } },
+                ...(win["has-focus"] || win.focused ? [{ tag: { value: "focused", color: "#fbbf24" } }] : []),
+              ]}
               actions={
                 <WindowActions
                   windowId={win.id}
@@ -664,6 +667,25 @@ function WindowActions({
       </ActionPanel.Section>
     </ActionPanel>
   );
+}
+
+function getDisplayColor(displayIndex: number | undefined): string {
+  // Define lighter, subtle colors for different displays
+  const colors = [
+    "#93c5fd", // Light blue for display 1
+    "#86efac", // Light green for display 2
+    "#fca5a5", // Light red for display 3
+    "#c4b5fd", // Light purple for display 4
+    "#fdba74", // Light orange for display 5
+    "#67e8f9", // Light cyan for display 6
+  ];
+  
+  if (!displayIndex || displayIndex < 1) {
+    return "#d1d5db"; // Light grey for unknown display
+  }
+  
+  // Use modulo to cycle through colors if more than 6 displays
+  return colors[(displayIndex - 1) % colors.length];
 }
 
 function getAppIcon(window: YabaiWindow, applications: Application[]) {
