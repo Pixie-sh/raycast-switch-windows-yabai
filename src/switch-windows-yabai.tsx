@@ -523,13 +523,17 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
             <List.Item
               key={win.id}
               id={`window-${win.id}`} // Add id for default selection
-              icon={getAppIcon(win, applications)}
-              title={win.app}
+              icon={{
+                ...getAppIcon(win, applications),
+                tintColor: win["has-focus"] || win.focused ? "#10b981" : undefined,
+              }}
+              title={`${win["has-focus"] || win.focused ? "• " : ""}${win.app}`}
               subtitle={win.title}
               accessories={[
                 { tag: { value: `#${win.display || "?"}`, color: getDisplayColor(win.display) } },
                 ...(win["has-focus"] || win.focused ? [{ tag: { value: "focused", color: "#fbbf24" } }] : []),
               ]}
+              keywords={win["has-focus"] || win.focused ? ["focused", "current"] : []}
               actions={
                 <WindowActions
                   windowId={win.id}
