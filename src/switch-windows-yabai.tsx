@@ -3,7 +3,13 @@ import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage } 
 import { useExec } from "@raycast/utils";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Application, ENV, SortMethod, YABAI, YabaiWindow } from "./models";
-import { handleAggregateToSpace, handleCloseEmptySpaces, handleCloseWindow, handleFocusWindow } from "./handlers";
+import {
+  handleAggregateToSpace,
+  handleCloseEmptySpaces,
+  handleCloseWindow,
+  handleFocusWindow,
+  handleOpenWindowInNewSpace,
+} from "./handlers";
 import { DisperseOnDisplayActions, MoveToDisplaySpace, MoveWindowToDisplayActions } from "./display-actions-yabai";
 import Fuse from "fuse.js";
 import { existsSync, readdirSync } from "node:fs";
@@ -374,14 +380,13 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     // Use improved search logic with app name prioritization
     try {
       const searchLower = searchText.toLowerCase();
-      
+
       // First, get all windows that match in either app name or title
-      const appMatches = windows.filter(win => win.app.toLowerCase().includes(searchLower));
-      const titleMatches = windows.filter(win => 
-        win.title.toLowerCase().includes(searchLower) && 
-        !win.app.toLowerCase().includes(searchLower) // Exclude if already in app matches
+      const appMatches = windows.filter((win) => win.app.toLowerCase().includes(searchLower));
+      const titleMatches = windows.filter(
+        (win) => win.title.toLowerCase().includes(searchLower) && !win.app.toLowerCase().includes(searchLower), // Exclude if already in app matches
       );
-      
+
       // If we have matches, prioritize app name matches over title matches
       if (appMatches.length > 0 || titleMatches.length > 0) {
         setIsSearching(false);
@@ -392,14 +397,14 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
           const bExact = b.app.toLowerCase() === searchLower;
           if (aExact && !bExact) return -1;
           if (!aExact && bExact) return 1;
-          
+
           // Then by app name length
           return a.app.length - b.app.length;
         });
-        
+
         // Sort title matches by title length
         const sortedTitleMatches = titleMatches.sort((a, b) => a.title.length - b.title.length);
-        
+
         // Return app matches first, then title matches
         return [...sortedAppMatches, ...sortedTitleMatches];
       }
@@ -563,6 +568,11 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
                     shortcut={{ modifiers: [], key: "enter" }}
                   />
                   <Action
+                    title="Open in New Space"
+                    onAction={handleOpenWindowInNewSpace(-1, app.name)}
+                    shortcut={{ modifiers: ["opt"], key: "enter" }}
+                  />
+                  <Action
                     title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
                     onAction={refreshAllData}
                     shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
@@ -614,7 +624,14 @@ function WindowActions({
     <ActionPanel>
       <Action
         title="Switch to Window"
-        onAction={isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused, applications)}
+        onAction={
+          isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused, applications)
+        }
+      />
+      <Action
+        title="Open in New Space"
+        onAction={handleOpenWindowInNewSpace(windowId, windowApp)}
+        shortcut={{ modifiers: ["opt"], key: "enter" }}
       />
       <Action
         title="Aggregate to Space"
