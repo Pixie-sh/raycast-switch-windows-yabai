@@ -683,11 +683,11 @@ function getDisplayColor(displayIndex: number | undefined): string {
     "#fdba74", // Light orange for display 5
     "#67e8f9", // Light cyan for display 6
   ];
-  
+
   if (!displayIndex || displayIndex < 1) {
     return "#d1d5db"; // Light grey for unknown display
   }
-  
+
   // Use modulo to cycle through colors if more than 6 displays
   return colors[(displayIndex - 1) % colors.length];
 }
