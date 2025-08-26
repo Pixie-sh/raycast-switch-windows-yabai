@@ -1,7 +1,7 @@
 // TypeScript
-import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage } from "@raycast/api";
+import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage, environment } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Application, ENV, SortMethod, YABAI, YabaiWindow } from "./models";
 import {
   handleAggregateToSpace,
@@ -115,8 +115,15 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     }
   }, []);
 
-  // Function to refresh windows data
-  const refreshWindows = useCallback(async () => {
+  // Use a ref to prevent simultaneous refreshes without causing dependency issues
+  const isRefreshingRef = useRef(false);
+  
+  // Function to refresh windows data with focus change detection
+  const refreshWindows = useCallback(async (forceFull = false) => {
+    // Don't refresh if already refreshing
+    if (isRefreshingRef.current) return;
+    
+    isRefreshingRef.current = true;
     setIsRefreshing(true);
     try {
       const { stdout } = await exec(`${YABAI} -m query --windows`, { env: ENV });
@@ -126,9 +133,24 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         try {
           const parsed = JSON.parse(stdoutStr);
           const windowsData = Array.isArray(parsed) ? parsed : [];
+          
+          // Check if focus has changed
+          const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
+          const newFocusedId = currentlyFocused?.id || null;
+          const previousFocusedId = focusHistory.current;
+          
+          // Always update the windows data to keep the list current
+          // But only log focus changes when they occur
           setWindows(windowsData);
-          updateFocusHistory(windowsData);
-
+          
+          // Update focus history if changed
+          if (newFocusedId !== previousFocusedId) {
+            updateFocusHistory(windowsData);
+            if (previousFocusedId !== null || newFocusedId !== null) {
+              console.log(`Focus changed from window ${previousFocusedId} to ${newFocusedId}`);
+            }
+          }
+          
           // Update cache with timestamp
           const cacheData = {
             windows: windowsData,
@@ -136,7 +158,6 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
           };
           await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
           setLastRefreshTime(Date.now());
-          console.log("Updated windows cache");
         } catch (parseError) {
           console.error("Error parsing windows data:", parseError, "Raw data:", stdoutStr);
         }
@@ -145,14 +166,15 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       console.error("Error refreshing windows:", error);
     } finally {
       setIsRefreshing(false);
+      isRefreshingRef.current = false;
     }
-  }, []);
+  }, [focusHistory.current, updateFocusHistory]);
 
   // Function to refresh all data
-  const refreshAllData = useCallback(async () => {
+  const refreshAllData = useCallback(async (forceFull = true) => {
     setIsRefreshing(true);
     try {
-      await Promise.all([refreshWindows(), refreshApplications()]);
+      await Promise.all([refreshWindows(forceFull), refreshApplications()]);
     } finally {
       setIsRefreshing(false);
     }
@@ -207,7 +229,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     LocalStorage.setItem("focusHistory", JSON.stringify(focusHistory));
   }, [focusHistory]);
 
-  // Query windows using useExec.
+  // Query windows using useExec - only for initial load
   const { isLoading, data, error } = useExec<YabaiWindow[]>(YABAI, ["-m", "query", "--windows"], {
     env: ENV,
     parseOutput: ({ stdout }) => {
@@ -222,7 +244,8 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         return [];
       }
     },
-    keepPreviousData: false,
+    keepPreviousData: true, // Keep previous data to avoid clearing the list
+    execute: windows.length === 0, // Only execute if we don't have windows yet
   });
 
   // Load cached windows and handle data changes
@@ -248,7 +271,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     loadCachedWindows();
 
     // Handle data changes from useExec
-    if (data !== undefined) {
+    if (data !== undefined && Array.isArray(data)) {
       setWindows(data);
       updateFocusHistory(data);
 
@@ -260,41 +283,21 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
       setLastRefreshTime(Date.now());
       console.log("Updated windows cache from useExec");
-    } else if (!isLoading && !error && !data) {
-      setWindows([]);
-      updateFocusHistory([]);
+    }
+    // Remove the else clause that was clearing windows
+    // We should only clear windows if there's an actual error, not when data is undefined
+    if (error) {
+      console.error("Error fetching windows from useExec:", error);
     }
   }, [data, isLoading, error]);
 
-  // Handle background refresh and launch type
+  // Initial refresh when extension opens
   useEffect(() => {
-    // Check if we need to refresh based on launch type
-    if (props.launchContext?.launchType === LaunchType.UserInitiated) {
-      // User explicitly launched the extension, refresh data
-      console.log("User initiated launch, refreshing data");
-      refreshAllData();
-    }
+    console.log("Extension mounted, refreshing all data");
+    refreshAllData(true);
+  }, []); // Empty dependency array - only run once per mount
 
-    // Check if data is stale (older than 5 minutes)
-    const isDataStale = Date.now() - lastRefreshTime > 5 * 60 * 1000;
-    if (isDataStale && lastRefreshTime > 0) {
-      console.log("Data is stale, refreshing");
-      refreshAllData();
-    }
-
-    // Set up periodic refresh (every 5 minutes)
-    const refreshInterval = setInterval(
-      () => {
-        console.log("Periodic refresh");
-        refreshAllData();
-      },
-      5 * 60 * 1000,
-    );
-
-    return () => {
-      clearInterval(refreshInterval);
-    };
-  }, [props.launchContext, lastRefreshTime, refreshAllData]);
+  // No background polling - rely on manual refresh to avoid flickering
 
   // Load applications when the component mounts
   useEffect(() => {
@@ -361,7 +364,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     });
   }, [applications]);
 
-  // Set searching state when input text changes
+  // Set searching state when input text changes and refresh on first search
   useEffect(() => {
     if (inputText.trim() && inputText !== searchText) {
       setIsSearching(true);
@@ -369,6 +372,15 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       setIsSearching(false);
     }
   }, [inputText, searchText]);
+  
+  // Refresh windows when user starts typing (only on first character)
+  useEffect(() => {
+    if (inputText.length === 1) {
+      // User just started typing, refresh the windows
+      console.log("User started searching, refreshing windows");
+      refreshWindows(false);
+    }
+  }, [inputText.length === 1]); // Only trigger when going from 0 to 1 character
 
   // Filter windows based on the search text using fuzzy search
   const filteredWindows = useMemo(() => {
@@ -499,6 +511,8 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     return sortedWindows.length > 0 ? sortedWindows[0] : undefined;
   }, [sortedWindows]);
 
+  // No need for focus/blur detection anymore since we only refresh on mount
+
   return (
     <List
       isLoading={isLoading || isSearching || isRefreshing}
@@ -511,14 +525,17 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         <ActionPanel>
           <Action
             title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
-            onAction={refreshAllData}
+            onAction={() => refreshAllData(true)}
             shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
           />
         </ActionPanel>
       }
     >
       {sortedWindows.length > 0 && (
-        <List.Section title="Windows" subtitle={sortedWindows.length.toString()}>
+        <List.Section 
+          title="Windows" 
+          subtitle={`${sortedWindows.length} windows ${lastRefreshTime > 0 ? `• Updated ${new Date(lastRefreshTime).toLocaleTimeString()}` : ''}`}
+        >
           {sortedWindows.map((win) => (
             <List.Item
               key={win.id}
@@ -572,7 +589,6 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
                     onAction={() => {
                       exec(`open "${app.path}"`);
                     }}
-                    shortcut={{ modifiers: [], key: "enter" }}
                   />
                   <Action
                     title="Open in New Space"
@@ -581,7 +597,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
                   />
                   <Action
                     title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
-                    onAction={refreshAllData}
+                    onAction={() => refreshAllData(true)}
                     shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
                   />
                 </ActionPanel>
