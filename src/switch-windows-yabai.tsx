@@ -1,5 +1,5 @@
 // TypeScript
-import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage, environment } from "@raycast/api";
+import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage } from "@raycast/api";
 import { useExec } from "@raycast/utils";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Application, ENV, SortMethod, YABAI, YabaiWindow } from "./models";
@@ -65,7 +65,8 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue;
 }
 
-export default function Command(props: { launchContext?: { launchType: LaunchType } }) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export default function Command(_props: { launchContext?: { launchType: LaunchType } }) {
   const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});
   const [inputText, setInputText] = useState("");
   const searchText = useDebounce(inputText, 30); // Reduced debounce delay for better responsiveness
@@ -74,7 +75,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   const [sortMethod, setSortMethod] = useState<SortMethod>(SortMethod.RECENTLY_USED);
   const [isSearching, setIsSearching] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
+  const [, setLastRefreshTime] = useState<number>(0);
 
   // Focus history to track current and previous focused windows
   const [focusHistory, setFocusHistory] = useState<{
@@ -117,68 +118,75 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
 
   // Use a ref to prevent simultaneous refreshes without causing dependency issues
   const isRefreshingRef = useRef(false);
-  
+
   // Function to refresh windows data with focus change detection
-  const refreshWindows = useCallback(async (forceFull = false) => {
-    // Don't refresh if already refreshing
-    if (isRefreshingRef.current) return;
-    
-    isRefreshingRef.current = true;
-    setIsRefreshing(true);
-    try {
-      const { stdout } = await exec(`${YABAI} -m query --windows`, { env: ENV });
-      if (stdout) {
-        // Ensure stdout is a string before parsing
-        const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
-        try {
-          const parsed = JSON.parse(stdoutStr);
-          const windowsData = Array.isArray(parsed) ? parsed : [];
-          
-          // Check if focus has changed
-          const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
-          const newFocusedId = currentlyFocused?.id || null;
-          const previousFocusedId = focusHistory.current;
-          
-          // Always update the windows data to keep the list current
-          // But only log focus changes when they occur
-          setWindows(windowsData);
-          
-          // Update focus history if changed
-          if (newFocusedId !== previousFocusedId) {
-            updateFocusHistory(windowsData);
-            if (previousFocusedId !== null || newFocusedId !== null) {
-              console.log(`Focus changed from window ${previousFocusedId} to ${newFocusedId}`);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const refreshWindows = useCallback(
+    async (_forceFull = false) => {
+      // Don't refresh if already refreshing
+      if (isRefreshingRef.current) return;
+
+      isRefreshingRef.current = true;
+      setIsRefreshing(true);
+      try {
+        const { stdout } = await exec(`${YABAI} -m query --windows`, { env: ENV });
+        if (stdout) {
+          // Ensure stdout is a string before parsing
+          const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+          try {
+            const parsed = JSON.parse(stdoutStr);
+            const windowsData = Array.isArray(parsed) ? parsed : [];
+
+            // Check if focus has changed
+            const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
+            const newFocusedId = currentlyFocused?.id || null;
+            const previousFocusedId = focusHistory.current;
+
+            // Always update the windows data to keep the list current
+            // But only log focus changes when they occur
+            setWindows(windowsData);
+
+            // Update focus history if changed
+            if (newFocusedId !== previousFocusedId) {
+              updateFocusHistory(windowsData);
+              if (previousFocusedId !== null || newFocusedId !== null) {
+                console.log(`Focus changed from window ${previousFocusedId} to ${newFocusedId}`);
+              }
             }
+
+            // Update cache with timestamp
+            const cacheData = {
+              windows: windowsData,
+              timestamp: Date.now(),
+            };
+            await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
+            setLastRefreshTime(Date.now());
+          } catch (parseError) {
+            console.error("Error parsing windows data:", parseError, "Raw data:", stdoutStr);
           }
-          
-          // Update cache with timestamp
-          const cacheData = {
-            windows: windowsData,
-            timestamp: Date.now(),
-          };
-          await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
-          setLastRefreshTime(Date.now());
-        } catch (parseError) {
-          console.error("Error parsing windows data:", parseError, "Raw data:", stdoutStr);
         }
+      } catch (error) {
+        console.error("Error refreshing windows:", error);
+      } finally {
+        setIsRefreshing(false);
+        isRefreshingRef.current = false;
       }
-    } catch (error) {
-      console.error("Error refreshing windows:", error);
-    } finally {
-      setIsRefreshing(false);
-      isRefreshingRef.current = false;
-    }
-  }, [focusHistory.current, updateFocusHistory]);
+    },
+    [focusHistory.current, updateFocusHistory],
+  );
 
   // Function to refresh all data
-  const refreshAllData = useCallback(async (forceFull = true) => {
-    setIsRefreshing(true);
-    try {
-      await Promise.all([refreshWindows(forceFull), refreshApplications()]);
-    } finally {
-      setIsRefreshing(false);
-    }
-  }, [refreshWindows, refreshApplications]);
+  const refreshAllData = useCallback(
+    async (forceFull = true) => {
+      setIsRefreshing(true);
+      try {
+        await Promise.all([refreshWindows(forceFull), refreshApplications()]);
+      } finally {
+        setIsRefreshing(false);
+      }
+    },
+    [refreshWindows, refreshApplications],
+  );
 
   // Load previous usage times, sort method, and focus history from local storage when the component mounts.
   useEffect(() => {
@@ -372,7 +380,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       setIsSearching(false);
     }
   }, [inputText, searchText]);
-  
+
   // Refresh windows when user starts typing (only on first character)
   useEffect(() => {
     if (inputText.length === 1) {
@@ -532,10 +540,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       }
     >
       {sortedWindows.length > 0 && (
-        <List.Section 
-          title="Windows" 
-          subtitle={`${sortedWindows.length} windows ${lastRefreshTime > 0 ? `• Updated ${new Date(lastRefreshTime).toLocaleTimeString()}` : ''}`}
-        >
+        <List.Section title="Windows" subtitle={sortedWindows.length.toString()}>
           {sortedWindows.map((win) => (
             <List.Item
               key={win.id}
