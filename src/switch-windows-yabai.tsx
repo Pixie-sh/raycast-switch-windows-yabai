@@ -15,6 +15,9 @@ import Fuse from "fuse.js";
 import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(exec);
 
 // Function to list applications from standard directories
 function listApplications(): Application[] {
@@ -130,7 +133,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       isRefreshingRef.current = true;
       setIsRefreshing(true);
       try {
-        const { stdout } = await exec(`${YABAI} -m query --windows`, { env: ENV });
+        const { stdout } = await execAsync(`${YABAI} -m query --windows`, { env: ENV });
         if (stdout) {
           // Ensure stdout is a string before parsing
           const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
