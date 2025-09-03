@@ -120,8 +120,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const isRefreshingRef = useRef(false);
 
   // Function to refresh windows data with focus change detection
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   const refreshWindows = useCallback(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     async (_forceFull = false) => {
       // Don't refresh if already refreshing
       if (isRefreshingRef.current) return;
@@ -485,14 +486,23 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       const currentWindow = focusHistory.current ? windows.find((w) => w.id === focusHistory.current) : null;
       const previousWindow = focusHistory.previous ? windows.find((w) => w.id === focusHistory.previous) : null;
 
+      // Also check for currently focused window from yabai data (more reliable)
+      const actuallyFocusedWindow = windows.find((win) => win["has-focus"] === true);
+
       return windows.sort((a, b) => {
-        // Previous window (from yabai focus history) comes first
+        // First priority: Previous window (the one we want to switch to) comes first
         if (previousWindow && a.id === previousWindow.id) return -1;
         if (previousWindow && b.id === previousWindow.id) return 1;
 
-        // Current window (from yabai focus history) comes second
-        if (currentWindow && a.id === currentWindow.id) return -1;
-        if (currentWindow && b.id === currentWindow.id) return 1;
+        // Handle currently focused window - put it last (we don't want to switch to the same window)
+        // Use both focus history and actual yabai focus data for reliability
+        const aIsCurrentlyFocused =
+          (currentWindow && a.id === currentWindow.id) || (actuallyFocusedWindow && a.id === actuallyFocusedWindow.id);
+        const bIsCurrentlyFocused =
+          (currentWindow && b.id === currentWindow.id) || (actuallyFocusedWindow && b.id === actuallyFocusedWindow.id);
+
+        if (aIsCurrentlyFocused && !bIsCurrentlyFocused) return 1; // a goes last
+        if (!aIsCurrentlyFocused && bIsCurrentlyFocused) return -1; // b goes last
 
         // For the rest, sort by extension usage time (most recent first), then by yabai order
         const timeA = usageTimes[a.id] || 0;
