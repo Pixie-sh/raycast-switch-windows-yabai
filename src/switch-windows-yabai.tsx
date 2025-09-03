@@ -478,44 +478,19 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     const windows = [...filteredWindows];
 
     if (sortMethod === SortMethod.USAGE) {
-      // Sort by usage (clicks)
+      // Sort by usage (clicks) - most recent first
       return windows.sort((a, b) => {
         const timeA = usageTimes[a.id] || 0;
         const timeB = usageTimes[b.id] || 0;
         return timeB - timeA;
       });
     } else if (sortMethod === SortMethod.RECENTLY_USED) {
-      // Use actual yabai focus history (tracks ALL window focus changes, not just extension usage)
-      const currentWindow = focusHistory.current ? windows.find((w) => w.id === focusHistory.current) : null;
-      const previousWindow = focusHistory.previous ? windows.find((w) => w.id === focusHistory.previous) : null;
-
-      // Also check for currently focused window from yabai data (more reliable)
-      const actuallyFocusedWindow = windows.find((win) => win["has-focus"] === true);
-
+      // Sort by recent focus - most recent first
+      // This gives us: [current, previous, other windows...]
       return windows.sort((a, b) => {
-        // First priority: Previous window (the one we want to switch to) comes first
-        if (previousWindow && a.id === previousWindow.id) return -1;
-        if (previousWindow && b.id === previousWindow.id) return 1;
-
-        // Handle currently focused window - put it last (we don't want to switch to the same window)
-        // Use both focus history and actual yabai focus data for reliability
-        const aIsCurrentlyFocused =
-          (currentWindow && a.id === currentWindow.id) || (actuallyFocusedWindow && a.id === actuallyFocusedWindow.id);
-        const bIsCurrentlyFocused =
-          (currentWindow && b.id === currentWindow.id) || (actuallyFocusedWindow && b.id === actuallyFocusedWindow.id);
-
-        if (aIsCurrentlyFocused && !bIsCurrentlyFocused) return 1; // a goes last
-        if (!aIsCurrentlyFocused && bIsCurrentlyFocused) return -1; // b goes last
-
-        // For the rest, sort by extension usage time (most recent first), then by yabai order
         const timeA = usageTimes[a.id] || 0;
         const timeB = usageTimes[b.id] || 0;
-        if (timeA !== timeB) {
-          return timeB - timeA;
-        }
-
-        // If no usage data, maintain yabai's natural order (by id)
-        return a.id - b.id;
+        return timeB - timeA;
       });
     }
 
@@ -525,11 +500,12 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       const timeB = usageTimes[b.id] || 0;
       return timeB - timeA;
     });
-  }, [filteredWindows, usageTimes, sortMethod, focusHistory]);
+  }, [filteredWindows, usageTimes, sortMethod]);
 
-  // Always select the first window in the list
-  const firstWindow = useMemo(() => {
-    return sortedWindows.length > 0 ? sortedWindows[0] : undefined;
+  // Select the second window in the list (previous window) for Alt+Tab behavior
+  // First window = current, Second window = previous (what we want to switch to)
+  const selectedWindow = useMemo(() => {
+    return sortedWindows.length > 1 ? sortedWindows[1] : sortedWindows[0];
   }, [sortedWindows]);
 
   // No need for focus/blur detection anymore since we only refresh on mount
@@ -541,7 +517,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       searchBarPlaceholder="Search windows and applications..."
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
-      selectedItemId={firstWindow ? `window-${firstWindow.id}` : undefined} // Select first window by default (index 0)
+      selectedItemId={selectedWindow ? `window-${selectedWindow.id}` : undefined} // Select second window (previous) for Alt+Tab
       actions={
         <ActionPanel>
           <Action
