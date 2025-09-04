@@ -10,7 +10,13 @@ import {
   handleFocusWindow,
   handleOpenWindowInNewSpace,
 } from "./handlers";
-import { DisperseOnDisplayActions, MoveToDisplaySpace, MoveWindowToDisplayActions, InteractiveMoveToDisplayAction, MoveToFocusedDisplayAction } from "./display-actions-yabai";
+import {
+  DisperseOnDisplayActions,
+  MoveToDisplaySpace,
+  MoveWindowToDisplayActions,
+  InteractiveMoveToDisplayAction,
+  MoveToFocusedDisplayAction,
+} from "./display-actions-yabai";
 import Fuse from "fuse.js";
 import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";

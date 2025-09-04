@@ -853,17 +853,17 @@ export async function getAvailableDisplays(): Promise<DisplayInfo[]> {
  */
 export const handleInteractiveMoveToDisplay = (windowId: number, windowApp: string, displayIndex: number) => {
   return async () => {
-    await showToast({ 
-      style: Toast.Style.Animated, 
-      title: `Moving to Display ${displayIndex}...` 
+    await showToast({
+      style: Toast.Style.Animated,
+      title: `Moving to Display ${displayIndex}...`,
     });
-    
+
     try {
       // Move the window to the specified display
       const { stderr } = await execFilePromise(
-        YABAI, 
-        ["-m", "window", windowId.toString(), "--display", displayIndex.toString()], 
-        { env: ENV }
+        YABAI,
+        ["-m", "window", windowId.toString(), "--display", displayIndex.toString()],
+        { env: ENV },
       );
 
       if (stderr?.trim()) {
@@ -885,7 +885,7 @@ export const handleInteractiveMoveToDisplay = (windowId: number, windowApp: stri
       }
 
       console.log(`Successfully moved window ${windowId} (${windowApp}) to display ${displayIndex}`);
-      
+
       await showToast({
         style: Toast.Style.Success,
         title: "Window Moved",
@@ -920,7 +920,7 @@ export async function getFocusedDisplay(): Promise<number> {
     // Ensure stdout is a string before parsing
     const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
     const display: YabaiDisplay = JSON.parse(stdoutStr);
-    
+
     return display.index;
   } catch (error: unknown) {
     console.error("Failed to get focused display:", error);
@@ -946,7 +946,7 @@ export async function getFocusedSpace(): Promise<number> {
     // Ensure stdout is a string before parsing
     const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
     const space: YabaiSpace = JSON.parse(stdoutStr);
-    
+
     return space.index;
   } catch (error: unknown) {
     console.error("Failed to get focused space:", error);
@@ -959,27 +959,27 @@ export async function getFocusedSpace(): Promise<number> {
  * @param windowId - The ID of the window to move
  * @param windowApp - The name of the application (for notifications)
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) => {
   return async () => {
-    await showToast({ 
-      style: Toast.Style.Animated, 
-      title: "Moving to Focused Space..." 
+    await showToast({
+      style: Toast.Style.Animated,
+      title: "Moving to Focused Space...",
     });
-    
+
     try {
       // Get the currently focused space (not just display)
       const focusedSpaceIndex = await getFocusedSpace();
-      
+
       // Get the current window info to check if THIS SPECIFIC WINDOW is already on the focused space
-      const windowResult = await execFilePromise(
-        YABAI, 
-        ["-m", "query", "--windows", "--window", windowId.toString()], 
-        { env: ENV }
-      );
-      
-      const windowStdout = typeof windowResult.stdout === "string" ? windowResult.stdout : JSON.stringify(windowResult.stdout);
+      const windowResult = await execFilePromise(YABAI, ["-m", "query", "--windows", "--window", windowId.toString()], {
+        env: ENV,
+      });
+
+      const windowStdout =
+        typeof windowResult.stdout === "string" ? windowResult.stdout : JSON.stringify(windowResult.stdout);
       const windowInfo: YabaiWindow = JSON.parse(windowStdout);
-      
+
       // Check if THIS SPECIFIC WINDOW is already on the focused space
       if (windowInfo.space === focusedSpaceIndex) {
         await showToast({
@@ -989,12 +989,12 @@ export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) 
         });
         return;
       }
-      
+
       // Move THIS SPECIFIC WINDOW to the focused space
       const { stderr } = await execFilePromise(
-        YABAI, 
-        ["-m", "window", windowId.toString(), "--space", focusedSpaceIndex.toString()], 
-        { env: ENV }
+        YABAI,
+        ["-m", "window", windowId.toString(), "--space", focusedSpaceIndex.toString()],
+        { env: ENV },
       );
 
       if (stderr?.trim()) {
@@ -1015,8 +1015,10 @@ export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) 
         // Don't fail the entire operation if focus fails
       }
 
-      console.log(`Successfully moved window ${windowId} ("${windowInfo.title}") to focused space ${focusedSpaceIndex}`);
-      
+      console.log(
+        `Successfully moved window ${windowId} ("${windowInfo.title}") to focused space ${focusedSpaceIndex}`,
+      );
+
       await showToast({
         style: Toast.Style.Success,
         title: "Window Moved to Focused Space",

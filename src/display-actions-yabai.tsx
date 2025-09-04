@@ -27,7 +27,14 @@
 import React from "react";
 import { Action, Keyboard, Icon } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { handleDisperseWindowsBySpace, handleMoveWindowToDisplay, handleMoveToDisplaySpace, getAvailableDisplays, handleInteractiveMoveToDisplay, handleMoveToFocusedDisplay } from "./handlers";
+import {
+  handleDisperseWindowsBySpace,
+  handleMoveWindowToDisplay,
+  handleMoveToDisplaySpace,
+  getAvailableDisplays,
+  handleInteractiveMoveToDisplay,
+  handleMoveToFocusedDisplay,
+} from "./handlers";
 import { ENV, YABAI, DisplayInfo } from "./models";
 import KeyEquivalent = Keyboard.KeyEquivalent;
 
@@ -153,14 +160,14 @@ interface InteractiveMoveToDisplayActionProps {
  * Interactive component that allows users to select a display to move a window to
  * Uses a submenu to show all available displays dynamically
  */
-export function InteractiveMoveToDisplayAction({ windowId, windowApp, windowTitle }: InteractiveMoveToDisplayActionProps) {
+export function InteractiveMoveToDisplayAction({ windowId, windowApp }: InteractiveMoveToDisplayActionProps) {
   const [displays, setDisplays] = React.useState<DisplayInfo[]>([]);
   const [isLoading, setIsLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
   const loadDisplays = React.useCallback(async () => {
     if (displays.length > 0) return; // Don't reload if we already have displays
-    
+
     setIsLoading(true);
     setError(null);
     try {
@@ -176,36 +183,18 @@ export function InteractiveMoveToDisplayAction({ windowId, windowApp, windowTitl
 
   // If there's an error or only one display, show a simple action
   if (error) {
-    return (
-      <Action
-        icon={Icon.ExclamationMark}
-        title="Move to Display (Error)"
-        subtitle={error}
-        onAction={() => {}}
-      />
-    );
+    return <Action icon={Icon.ExclamationMark} title="Move to Display (Error)" subtitle={error} onAction={() => {}} />;
   }
 
   // If loading, show loading state
   if (isLoading) {
-    return (
-      <Action
-        icon={Icon.Clock}
-        title="Loading Displays..."
-        onAction={() => {}}
-      />
-    );
+    return <Action icon={Icon.Clock} title="Loading Displays…" onAction={() => {}} />;
   }
 
   // If only one display, show disabled action
   if (displays.length <= 1) {
     return (
-      <Action
-        icon={Icon.Desktop}
-        title="Move to Display"
-        subtitle="Only one display available"
-        onAction={() => {}}
-      />
+      <Action icon={Icon.Desktop} title="Move to Display" subtitle="Only one display available" onAction={() => {}} />
     );
   }
 
@@ -229,7 +218,7 @@ export function InteractiveMoveToDisplayAction({ windowId, windowApp, windowTitl
           key={display.index}
           icon={display.isFocused ? Icon.CheckCircle : Icon.Circle}
           title={`Display ${display.index}`}
-          subtitle={`${display.dimensions}${display.isFocused ? ' (current)' : ''}`}
+          subtitle={`${display.dimensions}${display.isFocused ? " (current)" : ""}`}
           onAction={handleInteractiveMoveToDisplay(windowId, windowApp, display.index)}
         />
       ))}
