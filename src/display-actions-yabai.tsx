@@ -25,10 +25,10 @@
  */
 
 import React from "react";
-import { Action, Keyboard } from "@raycast/api";
+import { Action, Keyboard, Icon } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { handleDisperseWindowsBySpace, handleMoveWindowToDisplay, handleMoveToDisplaySpace } from "./handlers";
-import { ENV, YABAI } from "./models";
+import { handleDisperseWindowsBySpace, handleMoveWindowToDisplay, handleMoveToDisplaySpace, getAvailableDisplays, handleInteractiveMoveToDisplay, handleMoveToFocusedDisplay } from "./handlers";
+import { ENV, YABAI, DisplayInfo } from "./models";
 import KeyEquivalent = Keyboard.KeyEquivalent;
 
 interface Display {
@@ -139,6 +139,120 @@ export function MoveToDisplaySpace({ windowId, windowApp }: MoveToDisplaySpacePr
       title="Move to Empty Space on Current Display"
       onAction={handleMoveToDisplaySpace(windowId, windowApp)}
       shortcut={{ modifiers: ["cmd", "shift"], key: "m" }}
+    />
+  );
+}
+
+interface InteractiveMoveToDisplayActionProps {
+  windowId: number;
+  windowApp: string;
+  windowTitle: string;
+}
+
+/**
+ * Interactive component that allows users to select a display to move a window to
+ * Uses a submenu to show all available displays dynamically
+ */
+export function InteractiveMoveToDisplayAction({ windowId, windowApp, windowTitle }: InteractiveMoveToDisplayActionProps) {
+  const [displays, setDisplays] = React.useState<DisplayInfo[]>([]);
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const loadDisplays = React.useCallback(async () => {
+    if (displays.length > 0) return; // Don't reload if we already have displays
+    
+    setIsLoading(true);
+    setError(null);
+    try {
+      const availableDisplays = await getAvailableDisplays();
+      setDisplays(availableDisplays);
+    } catch (err) {
+      console.error("Failed to load displays:", err);
+      setError(err instanceof Error ? err.message : "Failed to load displays");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [displays.length]);
+
+  // If there's an error or only one display, show a simple action
+  if (error) {
+    return (
+      <Action
+        icon={Icon.ExclamationMark}
+        title="Move to Display (Error)"
+        subtitle={error}
+        onAction={() => {}}
+      />
+    );
+  }
+
+  // If loading, show loading state
+  if (isLoading) {
+    return (
+      <Action
+        icon={Icon.Clock}
+        title="Loading Displays..."
+        onAction={() => {}}
+      />
+    );
+  }
+
+  // If only one display, show disabled action
+  if (displays.length <= 1) {
+    return (
+      <Action
+        icon={Icon.Desktop}
+        title="Move to Display"
+        subtitle="Only one display available"
+        onAction={() => {}}
+      />
+    );
+  }
+
+  return (
+    <Action.Submenu
+      icon={Icon.Desktop}
+      title="Move to Display"
+      shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
+      onOpen={loadDisplays}
+    >
+      <Action
+        icon={Icon.Monitor}
+        title="Move to Focused Space"
+        subtitle="Move to the currently active space"
+        onAction={handleMoveToFocusedDisplay(windowId, windowApp)}
+        shortcut={{ modifiers: ["cmd", "shift"], key: "f" }}
+      />
+      <Action.Separator />
+      {displays.map((display) => (
+        <Action
+          key={display.index}
+          icon={display.isFocused ? Icon.CheckCircle : Icon.Circle}
+          title={`Display ${display.index}`}
+          subtitle={`${display.dimensions}${display.isFocused ? ' (current)' : ''}`}
+          onAction={handleInteractiveMoveToDisplay(windowId, windowApp, display.index)}
+        />
+      ))}
+    </Action.Submenu>
+  );
+}
+
+interface MoveToFocusedDisplayActionProps {
+  windowId: number;
+  windowApp: string;
+}
+
+/**
+ * Quick action to move window to the currently focused space
+ */
+export function MoveToFocusedDisplayAction({ windowId, windowApp }: MoveToFocusedDisplayActionProps) {
+  return (
+    <Action
+      icon={Icon.Monitor}
+      title="Move to Focused Space"
+      subtitle="Move to the currently active space"
+      onAction={handleMoveToFocusedDisplay(windowId, windowApp)}
+      shortcut={{ modifiers: ["cmd", "shift"], key: "f" }}
     />
   );
 }

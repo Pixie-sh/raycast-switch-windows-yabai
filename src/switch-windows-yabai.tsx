@@ -10,7 +10,7 @@ import {
   handleFocusWindow,
   handleOpenWindowInNewSpace,
 } from "./handlers";
-import { DisperseOnDisplayActions, MoveToDisplaySpace, MoveWindowToDisplayActions } from "./display-actions-yabai";
+import { DisperseOnDisplayActions, MoveToDisplaySpace, MoveWindowToDisplayActions, InteractiveMoveToDisplayAction, MoveToFocusedDisplayAction } from "./display-actions-yabai";
 import Fuse from "fuse.js";
 import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
@@ -549,6 +549,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                 <WindowActions
                   windowId={win.id}
                   windowApp={win.app}
+                  windowTitle={win.title}
                   isFocused={win["has-focus"] || win.focused}
                   onFocused={(id) => {
                     setUsageTimes((prev) => ({
@@ -619,6 +620,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 function WindowActions({
   windowId,
   windowApp,
+  windowTitle,
   onFocused,
   onRemove,
   setSortMethod,
@@ -629,6 +631,7 @@ function WindowActions({
 }: {
   windowId: number;
   windowApp: string;
+  windowTitle: string;
   onFocused: (id: number) => void;
   onRemove: (id: number) => void;
   setSortMethod: (method: SortMethod) => void;
@@ -671,6 +674,8 @@ function WindowActions({
         shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
       />
       <ActionPanel.Section title="Display Actions">
+        <MoveToFocusedDisplayAction windowId={windowId} windowApp={windowApp} />
+        <InteractiveMoveToDisplayAction windowId={windowId} windowApp={windowApp} windowTitle={windowTitle} />
         <DisperseOnDisplayActions />
         <MoveWindowToDisplayActions windowId={windowId} windowApp={windowApp} />
         <MoveToDisplaySpace windowId={windowId} windowApp={windowApp} />

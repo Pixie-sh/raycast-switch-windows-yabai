@@ -42,6 +42,14 @@ export interface YabaiDisplay {
   label: string;
   frame: { x: number; y: number; w: number; h: number };
   spaces: number[];
+  "has-focus": boolean;
+}
+
+export interface DisplayInfo {
+  index: number;
+  label: string;
+  dimensions: string;
+  isFocused: boolean;
 }
 
 export const YABAI = existsSync("/opt/homebrew/bin/yabai")

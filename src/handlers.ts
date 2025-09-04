@@ -1,7 +1,7 @@
 import { promisify } from "node:util";
 import { exec, execFile } from "node:child_process";
 import { showToast, Toast } from "@raycast/api";
-import { ENV, YABAI, YabaiSpace, YabaiWindow, Application } from "./models";
+import { ENV, YABAI, YabaiSpace, YabaiWindow, Application, YabaiDisplay, DisplayInfo } from "./models";
 
 const execFilePromise = promisify(execFile);
 const execPromise = promisify(exec);
@@ -811,3 +811,224 @@ export async function launchOrFocusApplication(appName: string, applications: Ap
 
   throw lastError || new Error("All application launch strategies failed");
 }
+
+// New Functions for Interactive Display Selection
+
+/**
+ * Query all available displays and return formatted information
+ * @returns Array of DisplayInfo objects with display details
+ */
+export async function getAvailableDisplays(): Promise<DisplayInfo[]> {
+  try {
+    const { stdout, stderr } = await execFilePromise(YABAI, ["-m", "query", "--displays"], {
+      env: ENV,
+    });
+
+    if (stderr?.trim()) {
+      console.error(`Error querying displays: ${stderr.trim()}`);
+      throw new Error(stderr.trim());
+    }
+
+    // Ensure stdout is a string before parsing
+    const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+    const displays: YabaiDisplay[] = JSON.parse(stdoutStr);
+
+    return displays.map((display) => ({
+      index: display.index,
+      label: display.label || `Display ${display.index}`,
+      dimensions: `${display.frame.w}×${display.frame.h}`,
+      isFocused: display["has-focus"] || false,
+    }));
+  } catch (error: unknown) {
+    console.error("Failed to query displays:", error);
+    throw error instanceof Error ? error : new Error("Failed to query displays");
+  }
+}
+
+/**
+ * Move window to a specific display with interactive selection
+ * @param windowId - The ID of the window to move
+ * @param windowApp - The name of the application (for notifications)
+ * @param displayIndex - The target display index
+ */
+export const handleInteractiveMoveToDisplay = (windowId: number, windowApp: string, displayIndex: number) => {
+  return async () => {
+    await showToast({ 
+      style: Toast.Style.Animated, 
+      title: `Moving to Display ${displayIndex}...` 
+    });
+    
+    try {
+      // Move the window to the specified display
+      const { stderr } = await execFilePromise(
+        YABAI, 
+        ["-m", "window", windowId.toString(), "--display", displayIndex.toString()], 
+        { env: ENV }
+      );
+
+      if (stderr?.trim()) {
+        console.error(`Error moving window ${windowId} to display ${displayIndex}: ${stderr.trim()}`);
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Move Failed",
+          message: stderr.trim(),
+        });
+        return;
+      }
+
+      // Focus the window after moving it
+      try {
+        await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--focus"], { env: ENV });
+      } catch (focusError) {
+        console.warn("Failed to focus window after move:", focusError);
+        // Don't fail the entire operation if focus fails
+      }
+
+      console.log(`Successfully moved window ${windowId} (${windowApp}) to display ${displayIndex}`);
+      
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Window Moved",
+        message: `${windowApp} moved to Display ${displayIndex}`,
+      });
+    } catch (error: unknown) {
+      console.error("Interactive move to display failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Move Failed",
+        message: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    }
+  };
+};
+
+/**
+ * Get the currently focused display index
+ * @returns The index of the currently focused display
+ */
+export async function getFocusedDisplay(): Promise<number> {
+  try {
+    const { stdout, stderr } = await execFilePromise(YABAI, ["-m", "query", "--displays", "--display"], {
+      env: ENV,
+    });
+
+    if (stderr?.trim()) {
+      console.error(`Error querying focused display: ${stderr.trim()}`);
+      throw new Error(stderr.trim());
+    }
+
+    // Ensure stdout is a string before parsing
+    const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+    const display: YabaiDisplay = JSON.parse(stdoutStr);
+    
+    return display.index;
+  } catch (error: unknown) {
+    console.error("Failed to get focused display:", error);
+    throw error instanceof Error ? error : new Error("Failed to get focused display");
+  }
+}
+
+/**
+ * Get the currently focused space index
+ * @returns The index of the currently focused space
+ */
+export async function getFocusedSpace(): Promise<number> {
+  try {
+    const { stdout, stderr } = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--space"], {
+      env: ENV,
+    });
+
+    if (stderr?.trim()) {
+      console.error(`Error querying focused space: ${stderr.trim()}`);
+      throw new Error(stderr.trim());
+    }
+
+    // Ensure stdout is a string before parsing
+    const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+    const space: YabaiSpace = JSON.parse(stdoutStr);
+    
+    return space.index;
+  } catch (error: unknown) {
+    console.error("Failed to get focused space:", error);
+    throw error instanceof Error ? error : new Error("Failed to get focused space");
+  }
+}
+
+/**
+ * Move window to the currently focused space (not just display)
+ * @param windowId - The ID of the window to move
+ * @param windowApp - The name of the application (for notifications)
+ */
+export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) => {
+  return async () => {
+    await showToast({ 
+      style: Toast.Style.Animated, 
+      title: "Moving to Focused Space..." 
+    });
+    
+    try {
+      // Get the currently focused space (not just display)
+      const focusedSpaceIndex = await getFocusedSpace();
+      
+      // Get the current window info to check if THIS SPECIFIC WINDOW is already on the focused space
+      const windowResult = await execFilePromise(
+        YABAI, 
+        ["-m", "query", "--windows", "--window", windowId.toString()], 
+        { env: ENV }
+      );
+      
+      const windowStdout = typeof windowResult.stdout === "string" ? windowResult.stdout : JSON.stringify(windowResult.stdout);
+      const windowInfo: YabaiWindow = JSON.parse(windowStdout);
+      
+      // Check if THIS SPECIFIC WINDOW is already on the focused space
+      if (windowInfo.space === focusedSpaceIndex) {
+        await showToast({
+          style: Toast.Style.Success,
+          title: "Already on Focused Space",
+          message: `Window "${windowInfo.title}" is already on the focused space`,
+        });
+        return;
+      }
+      
+      // Move THIS SPECIFIC WINDOW to the focused space
+      const { stderr } = await execFilePromise(
+        YABAI, 
+        ["-m", "window", windowId.toString(), "--space", focusedSpaceIndex.toString()], 
+        { env: ENV }
+      );
+
+      if (stderr?.trim()) {
+        console.error(`Error moving window ${windowId} to focused space ${focusedSpaceIndex}: ${stderr.trim()}`);
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Move Failed",
+          message: stderr.trim(),
+        });
+        return;
+      }
+
+      // Focus the window after moving it
+      try {
+        await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--focus"], { env: ENV });
+      } catch (focusError) {
+        console.warn("Failed to focus window after move:", focusError);
+        // Don't fail the entire operation if focus fails
+      }
+
+      console.log(`Successfully moved window ${windowId} ("${windowInfo.title}") to focused space ${focusedSpaceIndex}`);
+      
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Window Moved to Focused Space",
+        message: `"${windowInfo.title}" moved to the currently focused space`,
+      });
+    } catch (error: unknown) {
+      console.error("Move to focused space failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Move Failed",
+        message: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    }
+  };
+};
