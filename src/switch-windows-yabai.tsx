@@ -483,25 +483,31 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const sortedWindows = useMemo(() => {
     const windows = [...filteredWindows];
 
-    if (sortMethod === SortMethod.USAGE) {
-      // Sort by usage (clicks) - most recent first
-      return windows.sort((a, b) => {
-        const timeA = usageTimes[a.id] || 0;
-        const timeB = usageTimes[b.id] || 0;
-        return timeB - timeA;
-      });
-    } else if (sortMethod === SortMethod.RECENTLY_USED) {
-      // Sort by recent focus - most recent first
-      // This gives us: [current, previous, other windows...]
-      return windows.sort((a, b) => {
-        const timeA = usageTimes[a.id] || 0;
-        const timeB = usageTimes[b.id] || 0;
-        return timeB - timeA;
-      });
-    }
-
-    // Default fallback to usage sort
+    // Always prioritize the focused window at the top, regardless of sort method
     return windows.sort((a, b) => {
+      // Check if either window is focused
+      const aFocused = a["has-focus"] || a.focused;
+      const bFocused = b["has-focus"] || b.focused;
+      
+      // If one is focused and the other isn't, focused window goes first
+      if (aFocused && !bFocused) return -1;
+      if (!aFocused && bFocused) return 1;
+      
+      // If both are focused or neither is focused, use the selected sort method
+      if (sortMethod === SortMethod.USAGE) {
+        // Sort by usage (clicks) - most recent first
+        const timeA = usageTimes[a.id] || 0;
+        const timeB = usageTimes[b.id] || 0;
+        return timeB - timeA;
+      } else if (sortMethod === SortMethod.RECENTLY_USED) {
+        // Sort by recent focus - most recent first
+        // This gives us: [current, previous, other windows...]
+        const timeA = usageTimes[a.id] || 0;
+        const timeB = usageTimes[b.id] || 0;
+        return timeB - timeA;
+      }
+
+      // Default fallback to usage sort
       const timeA = usageTimes[a.id] || 0;
       const timeB = usageTimes[b.id] || 0;
       return timeB - timeA;
