@@ -488,11 +488,11 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       // Check if either window is focused
       const aFocused = a["has-focus"] || a.focused;
       const bFocused = b["has-focus"] || b.focused;
-      
+
       // If one is focused and the other isn't, focused window goes first
       if (aFocused && !bFocused) return -1;
       if (!aFocused && bFocused) return 1;
-      
+
       // If both are focused or neither is focused, use the selected sort method
       if (sortMethod === SortMethod.USAGE) {
         // Sort by usage (clicks) - most recent first
