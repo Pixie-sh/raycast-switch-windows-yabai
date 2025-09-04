@@ -35,6 +35,15 @@ export interface YabaiSpace {
   display: number;
 }
 
+export interface YabaiDisplay {
+  id: number;
+  uuid: string;
+  index: number;
+  label: string;
+  frame: { x: number; y: number; w: number; h: number };
+  spaces: number[];
+}
+
 export const YABAI = existsSync("/opt/homebrew/bin/yabai")
   ? "/opt/homebrew/bin/yabai"
   : existsSync("/usr/local/bin/yabai")

@@ -1,13 +1,18 @@
 import { promisify } from "node:util";
 import { exec, execFile } from "node:child_process";
 import { showToast, Toast } from "@raycast/api";
-import { ENV, YABAI, YabaiSpace, YabaiWindow } from "./models";
+import { ENV, YABAI, YabaiSpace, YabaiWindow, Application } from "./models";
 
 const execFilePromise = promisify(execFile);
 const execPromise = promisify(exec);
 
-// Focus a window.
-export const handleFocusWindow = (windowId: number, windowApp: string, onFocused: (id: number) => void) => {
+// Focus a window with intelligent fallback to application launch.
+export const handleFocusWindow = (
+  windowId: number,
+  windowApp: string,
+  onFocused: (id: number) => void,
+  applications: Application[] = [],
+) => {
   return async () => {
     await showToast({ style: Toast.Style.Animated, title: "Focusing Window..." });
     try {
@@ -15,11 +20,40 @@ export const handleFocusWindow = (windowId: number, windowApp: string, onFocused
         env: ENV,
       });
       if (stderr?.trim()) {
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Yabai Error - Focus Window",
-          message: stderr.trim(),
-        });
+        console.log(`Yabai window focus stderr: ${stderr.trim()}`);
+
+        // Check if the error indicates window doesn't exist
+        if (isWindowNotFoundError(stderr.trim()) || isApplicationNotRunningError(stderr.trim())) {
+          console.log(`Window ${windowId} not found, attempting to launch application ${windowApp}`);
+
+          // Update toast to indicate switching to app launch
+          await showToast({ style: Toast.Style.Animated, title: `Launching ${windowApp}...` });
+
+          try {
+            const strategy = await launchOrFocusApplication(windowApp, applications);
+            await showToast({
+              style: Toast.Style.Success,
+              title: `${windowApp} launched`,
+              message: `Used ${strategy} since no window was found`,
+            });
+            // Still call onFocused to update usage times, even though we launched instead of focused
+            onFocused(windowId);
+          } catch (launchError) {
+            console.error(`Failed to launch application ${windowApp}:`, launchError);
+            await showToast({
+              style: Toast.Style.Failure,
+              title: "Failed to Launch Application",
+              message: `Could not focus window or launch ${windowApp}: ${launchError instanceof Error ? launchError.message : "Unknown error"}`,
+            });
+          }
+        } else {
+          // Other yabai errors that don't indicate missing window
+          await showToast({
+            style: Toast.Style.Failure,
+            title: "Yabai Error - Focus Window",
+            message: stderr.trim(),
+          });
+        }
       } else {
         await showToast({
           style: Toast.Style.Success,
@@ -28,11 +62,41 @@ export const handleFocusWindow = (windowId: number, windowApp: string, onFocused
         onFocused(windowId);
       }
     } catch (error: unknown) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: `Failed Window ${windowApp} (${windowId}) focus`,
-        message: error instanceof Error ? error.message : "Unknown error while focusing window",
-      });
+      const errorMessage = error instanceof Error ? error.message : "Unknown error while focusing window";
+      console.log(`Yabai window focus exception: ${errorMessage}`);
+
+      // Check if the exception also indicates window doesn't exist
+      if (isWindowNotFoundError(errorMessage) || isApplicationNotRunningError(errorMessage)) {
+        console.log(`Exception indicates window ${windowId} not found, attempting to launch application ${windowApp}`);
+
+        // Update toast to indicate switching to app launch
+        await showToast({ style: Toast.Style.Animated, title: `Launching ${windowApp}...` });
+
+        try {
+          const strategy = await launchOrFocusApplication(windowApp, applications);
+          await showToast({
+            style: Toast.Style.Success,
+            title: `${windowApp} launched`,
+            message: `Used ${strategy} since no window was found`,
+          });
+          // Still call onFocused to update usage times, even though we launched instead of focused
+          onFocused(windowId);
+        } catch (launchError) {
+          console.error(`Failed to launch application ${windowApp}:`, launchError);
+          await showToast({
+            style: Toast.Style.Failure,
+            title: "Failed to Launch Application",
+            message: `Could not focus window or launch ${windowApp}: ${launchError instanceof Error ? launchError.message : "Unknown error"}`,
+          });
+        }
+      } else {
+        // Other errors that don't indicate missing window
+        await showToast({
+          style: Toast.Style.Failure,
+          title: `Failed Window ${windowApp} (${windowId}) focus`,
+          message: errorMessage,
+        });
+      }
     }
   };
 };
@@ -343,6 +407,166 @@ export const handleDisperseWindowsBySpace = (screenIdx: string) => {
   };
 };
 
+/**
+ * Open a window in a new space on the current display
+ * This function always creates a new space, moves the window to it, and focuses both the space and window.
+ * If windowId is -1 (application launch), creates space on display 1.
+ * @param windowId - The ID of the window to move (-1 for application launch)
+ * @param windowApp - The name of the application for display in toast notifications
+ */
+export const handleOpenWindowInNewSpace = (windowId: number, windowApp: string) => {
+  return async () => {
+    await showToast({ style: Toast.Style.Animated, title: "Opening in New Space..." });
+    try {
+      let targetDisplay = 1; // Default to display 1 for application launches
+      let windowExists = false;
+
+      // Step 1: Check if we have a valid window ID
+      if (windowId > 0) {
+        try {
+          // Try to get the current window info to determine its display
+          const windowResult = await execFilePromise(
+            YABAI,
+            ["-m", "query", "--windows", "--window", windowId.toString()],
+            {
+              env: ENV,
+            },
+          );
+
+          const windowStdout =
+            typeof windowResult.stdout === "string" ? windowResult.stdout : JSON.stringify(windowResult.stdout);
+          const windowInfo: YabaiWindow = JSON.parse(windowStdout);
+          targetDisplay = windowInfo.display || 1;
+          windowExists = true;
+          console.log(`Window ${windowId} is on display ${targetDisplay}`);
+        } catch {
+          // Window doesn't exist, we're launching an application
+          console.log(`Window ${windowId} not found, will create space on display 1 for application launch`);
+          windowExists = false;
+        }
+      } else {
+        console.log(`No window ID provided, will create space on display 1 for application launch`);
+      }
+
+      // Step 2: Get the current focused space on the target display to know where to create the new space
+      const displayResult = await execFilePromise(
+        YABAI,
+        ["-m", "query", "--displays", "--display", targetDisplay.toString()],
+        {
+          env: ENV,
+        },
+      );
+      const displayStdout =
+        typeof displayResult.stdout === "string" ? displayResult.stdout : JSON.stringify(displayResult.stdout);
+      JSON.parse(displayStdout); // Verify display exists
+
+      // Step 3: Create a new space on the target display
+      console.log(`Creating new space on display ${targetDisplay}`);
+
+      // Check if we need to focus the display first
+      // Only focus if it's not already the current display
+      try {
+        const currentDisplayResult = await execFilePromise(YABAI, ["-m", "query", "--displays", "--display"], {
+          env: ENV,
+        });
+        const currentDisplayStdout =
+          typeof currentDisplayResult.stdout === "string"
+            ? currentDisplayResult.stdout
+            : JSON.stringify(currentDisplayResult.stdout);
+        const currentDisplayInfo = JSON.parse(currentDisplayStdout);
+
+        if (currentDisplayInfo.index !== targetDisplay) {
+          console.log(`Switching focus from display ${currentDisplayInfo.index} to display ${targetDisplay}`);
+          await execFilePromise(YABAI, ["-m", "display", "--focus", targetDisplay.toString()], { env: ENV });
+        } else {
+          console.log(`Display ${targetDisplay} is already focused`);
+        }
+      } catch {
+        // If we can't query the current display, try to focus anyway but don't fail if it errors
+        console.log(`Could not query current display, attempting to focus display ${targetDisplay}`);
+        try {
+          await execFilePromise(YABAI, ["-m", "display", "--focus", targetDisplay.toString()], { env: ENV });
+        } catch (focusError: unknown) {
+          // Ignore "already focused" errors
+          const errorObj = focusError as { stderr?: string };
+          if (!errorObj?.stderr?.includes("already focused")) {
+            throw focusError;
+          }
+          console.log(`Display ${targetDisplay} was already focused`);
+        }
+      }
+
+      // Create the new space
+      await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
+
+      // Step 4: Query spaces to get the newly created space
+      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
+      const spacesStdout =
+        typeof spacesResult.stdout === "string" ? spacesResult.stdout : JSON.stringify(spacesResult.stdout);
+      const allSpaces: YabaiSpace[] = JSON.parse(spacesStdout);
+
+      // Find the newly created space on the target display
+      // It should be the space with the highest index on the target display
+      const spacesOnTargetDisplay = allSpaces.filter((space) => space.display === targetDisplay);
+      const newSpace = spacesOnTargetDisplay.sort((a, b) => b.index - a.index)[0];
+
+      if (!newSpace) {
+        throw new Error(`Failed to create or find new space on display ${targetDisplay}`);
+      }
+
+      const targetSpaceIndex = newSpace.index;
+      console.log(`Created new space ${targetSpaceIndex} on display ${targetDisplay}`);
+
+      // Step 5: If we have a window, move it to the new space
+      if (windowExists && windowId > 0) {
+        const moveResult = await execFilePromise(
+          YABAI,
+          ["-m", "window", windowId.toString(), "--space", targetSpaceIndex.toString()],
+          { env: ENV },
+        );
+
+        if (moveResult.stderr?.trim()) {
+          console.error(`Error moving window ${windowId}: ${moveResult.stderr.trim()}`);
+          await showToast({
+            style: Toast.Style.Failure,
+            title: "Yabai Error - Move Window to New Space",
+            message: moveResult.stderr.trim(),
+          });
+          return;
+        }
+      }
+
+      // Step 6: Focus the new space
+      await execFilePromise(YABAI, ["-m", "space", "--focus", targetSpaceIndex.toString()], { env: ENV });
+
+      // Step 7: If we have a window, focus it. Otherwise, launch the application
+      if (windowExists && windowId > 0) {
+        await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--focus"], { env: ENV });
+        console.log(
+          `Successfully opened window ${windowId} in new space ${targetSpaceIndex} on display ${targetDisplay}`,
+        );
+      } else {
+        // Launch the application in the new space
+        console.log(`Launching ${windowApp} in new space ${targetSpaceIndex} on display ${targetDisplay}`);
+        await execPromise(`open -a "${windowApp}"`, { env: ENV });
+      }
+
+      await showToast({
+        style: Toast.Style.Success,
+        title: windowExists ? "Window Opened in New Space" : "Application Launched in New Space",
+        message: `${windowApp} has been ${windowExists ? "moved to" : "launched in"} a new space on display ${targetDisplay}.`,
+      });
+    } catch (error: unknown) {
+      console.error("Open in new space failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Open in New Space Failed",
+        message: error instanceof Error ? error.message : "An unknown error occurred while opening in a new space.",
+      });
+    }
+  };
+};
+
 // Move window to an empty space on the current display, or create a new space if none exists
 export const handleMoveToDisplaySpace = (windowId: number, windowApp: string) => {
   return async () => {
@@ -446,3 +670,144 @@ export const handleMoveToDisplaySpace = (windowId: number, windowApp: string) =>
     }
   };
 };
+
+// Utility Functions for Application Management and Window Fallback
+
+/**
+ * Check if yabai error indicates window not found
+ */
+export function isWindowNotFoundError(error: string): boolean {
+  const windowNotFoundIndicators = [
+    "could not locate the window with the specified id",
+    "window not found",
+    "invalid window id",
+    "no such window",
+    "window does not exist",
+  ];
+  const errorLower = error.toLowerCase();
+  return windowNotFoundIndicators.some((indicator) => errorLower.includes(indicator));
+}
+
+/**
+ * Check if yabai error indicates general application not found/not running
+ */
+export function isApplicationNotRunningError(error: string): boolean {
+  const appNotRunningIndicators = [
+    "application not running",
+    "no such application",
+    "app not found",
+    "application is not running",
+  ];
+  const errorLower = error.toLowerCase();
+  return appNotRunningIndicators.some((indicator) => errorLower.includes(indicator));
+}
+
+/**
+ * Validate if a window still exists in yabai
+ */
+export async function validateWindowExists(windowId: number): Promise<boolean> {
+  try {
+    await execFilePromise(YABAI, ["-m", "query", "--windows", "--window", windowId.toString()], {
+      env: ENV,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get application path from applications list
+ */
+export function getApplicationPath(appName: string, applications: Application[]): string | null {
+  const app = applications.find(
+    (app) =>
+      app.name.toLowerCase() === appName.toLowerCase() ||
+      app.name.toLowerCase().includes(appName.toLowerCase()) ||
+      appName.toLowerCase().includes(app.name.toLowerCase()),
+  );
+  return app?.path || null;
+}
+
+/**
+ * Launch application using macOS open command
+ */
+export async function launchApplicationByName(appName: string): Promise<void> {
+  try {
+    // First try using the app name directly
+    await execPromise(`open -a "${appName}"`, { env: ENV });
+    console.log(`Successfully launched ${appName} using open -a`);
+  } catch (error) {
+    console.error(`Failed to launch ${appName} with open -a:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Launch application using full path
+ */
+export async function launchApplicationByPath(appPath: string): Promise<void> {
+  try {
+    await execPromise(`open "${appPath}"`, { env: ENV });
+    console.log(`Successfully launched app at ${appPath}`);
+  } catch (error) {
+    console.error(`Failed to launch app at ${appPath}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Focus application using AppleScript as fallback
+ */
+export async function focusApplicationWithAppleScript(appName: string): Promise<void> {
+  try {
+    const script = `tell application "${appName}" to activate`;
+    await execPromise(`osascript -e '${script}'`, { env: ENV });
+    console.log(`Successfully focused ${appName} using AppleScript`);
+  } catch (error) {
+    console.error(`Failed to focus ${appName} with AppleScript:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Comprehensive application launch/focus with multiple fallback strategies
+ */
+export async function launchOrFocusApplication(appName: string, applications: Application[]): Promise<string> {
+  const strategies: Array<{ name: string; action: () => Promise<void> }> = [
+    {
+      name: "open -a command",
+      action: () => launchApplicationByName(appName),
+    },
+  ];
+
+  // Add path-based launch if we have the path
+  const appPath = getApplicationPath(appName, applications);
+  if (appPath) {
+    strategies.push({
+      name: "path-based launch",
+      action: () => launchApplicationByPath(appPath),
+    });
+  }
+
+  // Add AppleScript as final fallback
+  strategies.push({
+    name: "AppleScript activation",
+    action: () => focusApplicationWithAppleScript(appName),
+  });
+
+  let lastError: Error | null = null;
+
+  for (const strategy of strategies) {
+    try {
+      await strategy.action();
+      return strategy.name; // Return the successful strategy name
+    } catch (error) {
+      console.log(`Strategy '${strategy.name}' failed:`, error);
+      lastError = error instanceof Error ? error : new Error(String(error));
+      continue; // Try next strategy
+    }
+  }
+
+  throw lastError || new Error("All application launch strategies failed");
+}

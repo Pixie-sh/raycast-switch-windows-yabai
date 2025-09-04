@@ -1,14 +1,23 @@
 // TypeScript
 import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Application, ENV, SortMethod, YABAI, YabaiWindow } from "./models";
-import { handleAggregateToSpace, handleCloseEmptySpaces, handleCloseWindow, handleFocusWindow } from "./handlers";
+import {
+  handleAggregateToSpace,
+  handleCloseEmptySpaces,
+  handleCloseWindow,
+  handleFocusWindow,
+  handleOpenWindowInNewSpace,
+} from "./handlers";
 import { DisperseOnDisplayActions, MoveToDisplaySpace, MoveWindowToDisplayActions } from "./display-actions-yabai";
 import Fuse from "fuse.js";
 import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { exec } from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(exec);
 
 // Function to list applications from standard directories
 function listApplications(): Application[] {
@@ -59,7 +68,8 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue;
 }
 
-export default function Command(props: { launchContext?: { launchType: LaunchType } }) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export default function Command(_props: { launchContext?: { launchType: LaunchType } }) {
   const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});
   const [inputText, setInputText] = useState("");
   const searchText = useDebounce(inputText, 30); // Reduced debounce delay for better responsiveness
@@ -68,7 +78,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
   const [sortMethod, setSortMethod] = useState<SortMethod>(SortMethod.RECENTLY_USED);
   const [isSearching, setIsSearching] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
+  const [, setLastRefreshTime] = useState<number>(0);
 
   // Focus history to track current and previous focused windows
   const [focusHistory, setFocusHistory] = useState<{
@@ -109,48 +119,78 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     }
   }, []);
 
-  // Function to refresh windows data
-  const refreshWindows = useCallback(async () => {
-    setIsRefreshing(true);
-    try {
-      const { stdout } = await exec(`${YABAI} -m query --windows`, { env: ENV });
-      if (stdout) {
-        // Ensure stdout is a string before parsing
-        const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
-        try {
-          const parsed = JSON.parse(stdoutStr);
-          const windowsData = Array.isArray(parsed) ? parsed : [];
-          setWindows(windowsData);
-          updateFocusHistory(windowsData);
+  // Use a ref to prevent simultaneous refreshes without causing dependency issues
+  const isRefreshingRef = useRef(false);
 
-          // Update cache with timestamp
-          const cacheData = {
-            windows: windowsData,
-            timestamp: Date.now(),
-          };
-          await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
-          setLastRefreshTime(Date.now());
-          console.log("Updated windows cache");
-        } catch (parseError) {
-          console.error("Error parsing windows data:", parseError, "Raw data:", stdoutStr);
+  // Function to refresh windows data with focus change detection
+
+  const refreshWindows = useCallback(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async (_forceFull = false) => {
+      // Don't refresh if already refreshing
+      if (isRefreshingRef.current) return;
+
+      isRefreshingRef.current = true;
+      setIsRefreshing(true);
+      try {
+        const { stdout } = await execAsync(`${YABAI} -m query --windows`, { env: ENV });
+        if (stdout) {
+          // Ensure stdout is a string before parsing
+          const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+          try {
+            const parsed = JSON.parse(stdoutStr);
+            const windowsData = Array.isArray(parsed) ? parsed : [];
+
+            // Check if focus has changed
+            const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
+            const newFocusedId = currentlyFocused?.id || null;
+            const previousFocusedId = focusHistory.current;
+
+            // Always update the windows data to keep the list current
+            // But only log focus changes when they occur
+            setWindows(windowsData);
+
+            // Update focus history if changed
+            if (newFocusedId !== previousFocusedId) {
+              updateFocusHistory(windowsData);
+              if (previousFocusedId !== null || newFocusedId !== null) {
+                console.log(`Focus changed from window ${previousFocusedId} to ${newFocusedId}`);
+              }
+            }
+
+            // Update cache with timestamp
+            const cacheData = {
+              windows: windowsData,
+              timestamp: Date.now(),
+            };
+            await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
+            setLastRefreshTime(Date.now());
+          } catch (parseError) {
+            console.error("Error parsing windows data:", parseError, "Raw data:", stdoutStr);
+          }
         }
+      } catch (error) {
+        console.error("Error refreshing windows:", error);
+      } finally {
+        setIsRefreshing(false);
+        isRefreshingRef.current = false;
       }
-    } catch (error) {
-      console.error("Error refreshing windows:", error);
-    } finally {
-      setIsRefreshing(false);
-    }
-  }, []);
+    },
+    [focusHistory.current, updateFocusHistory],
+  );
 
   // Function to refresh all data
-  const refreshAllData = useCallback(async () => {
-    setIsRefreshing(true);
-    try {
-      await Promise.all([refreshWindows(), refreshApplications()]);
-    } finally {
-      setIsRefreshing(false);
-    }
-  }, [refreshWindows, refreshApplications]);
+  const refreshAllData = useCallback(
+    async (forceFull = true) => {
+      setIsRefreshing(true);
+      try {
+        await Promise.all([refreshWindows(forceFull), refreshApplications()]);
+      } finally {
+        setIsRefreshing(false);
+      }
+    },
+    [refreshWindows, refreshApplications],
+  );
 
   // Load previous usage times, sort method, and focus history from local storage when the component mounts.
   useEffect(() => {
@@ -201,7 +241,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     LocalStorage.setItem("focusHistory", JSON.stringify(focusHistory));
   }, [focusHistory]);
 
-  // Query windows using useExec.
+  // Query windows using useExec - only for initial load
   const { isLoading, data, error } = useExec<YabaiWindow[]>(YABAI, ["-m", "query", "--windows"], {
     env: ENV,
     parseOutput: ({ stdout }) => {
@@ -216,7 +256,8 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
         return [];
       }
     },
-    keepPreviousData: false,
+    keepPreviousData: true, // Keep previous data to avoid clearing the list
+    execute: windows.length === 0, // Only execute if we don't have windows yet
   });
 
   // Load cached windows and handle data changes
@@ -242,7 +283,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     loadCachedWindows();
 
     // Handle data changes from useExec
-    if (data !== undefined) {
+    if (data !== undefined && Array.isArray(data)) {
       setWindows(data);
       updateFocusHistory(data);
 
@@ -254,41 +295,21 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
       setLastRefreshTime(Date.now());
       console.log("Updated windows cache from useExec");
-    } else if (!isLoading && !error && !data) {
-      setWindows([]);
-      updateFocusHistory([]);
+    }
+    // Remove the else clause that was clearing windows
+    // We should only clear windows if there's an actual error, not when data is undefined
+    if (error) {
+      console.error("Error fetching windows from useExec:", error);
     }
   }, [data, isLoading, error]);
 
-  // Handle background refresh and launch type
+  // Initial refresh when extension opens
   useEffect(() => {
-    // Check if we need to refresh based on launch type
-    if (props.launchContext?.launchType === LaunchType.UserInitiated) {
-      // User explicitly launched the extension, refresh data
-      console.log("User initiated launch, refreshing data");
-      refreshAllData();
-    }
+    console.log("Extension mounted, refreshing all data");
+    refreshAllData(true);
+  }, []); // Empty dependency array - only run once per mount
 
-    // Check if data is stale (older than 5 minutes)
-    const isDataStale = Date.now() - lastRefreshTime > 5 * 60 * 1000;
-    if (isDataStale && lastRefreshTime > 0) {
-      console.log("Data is stale, refreshing");
-      refreshAllData();
-    }
-
-    // Set up periodic refresh (every 5 minutes)
-    const refreshInterval = setInterval(
-      () => {
-        console.log("Periodic refresh");
-        refreshAllData();
-      },
-      5 * 60 * 1000,
-    );
-
-    return () => {
-      clearInterval(refreshInterval);
-    };
-  }, [props.launchContext, lastRefreshTime, refreshAllData]);
+  // No background polling - rely on manual refresh to avoid flickering
 
   // Load applications when the component mounts
   useEffect(() => {
@@ -317,18 +338,18 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     if (!Array.isArray(windows) || windows.length === 0) return null;
     return new Fuse(windows, {
       keys: [
-        { name: "title", weight: 2 }, // Give title higher weight
-        { name: "app", weight: 1 },
+        { name: "app", weight: 3 }, // Give app name highest weight
+        { name: "title", weight: 1 }, // Lower weight for title
       ],
       includeScore: true,
       threshold: 0.4, // Lower threshold for stricter matching
       ignoreLocation: true, // Search the entire string, not just from the beginning
       useExtendedSearch: true, // Enable extended search for more powerful queries
       sortFn: (a, b) => {
-        // Custom sort function to prioritize exact matches
+        // Custom sort function to prioritize app matches over title matches
         if (a.score === b.score) {
-          // If scores are equal, prioritize shorter matches (more precise)
-          return a.item.title.toString().length - b.item.title.toString().length;
+          // If scores are equal, prioritize shorter app names (more precise)
+          return a.item.app.toString().length - b.item.app.toString().length;
         }
         return a.score - b.score; // Lower score is better
       },
@@ -355,7 +376,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     });
   }, [applications]);
 
-  // Set searching state when input text changes
+  // Set searching state when input text changes and refresh on first search
   useEffect(() => {
     if (inputText.trim() && inputText !== searchText) {
       setIsSearching(true);
@@ -364,6 +385,15 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     }
   }, [inputText, searchText]);
 
+  // Refresh windows when user starts typing (only on first character)
+  useEffect(() => {
+    if (inputText.length === 1) {
+      // User just started typing, refresh the windows
+      console.log("User started searching, refreshing windows");
+      refreshWindows(false);
+    }
+  }, [inputText.length === 1]); // Only trigger when going from 0 to 1 character
+
   // Filter windows based on the search text using fuzzy search
   const filteredWindows = useMemo(() => {
     if (!Array.isArray(windows)) return [];
@@ -371,19 +401,36 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
 
     if (!fuse) return [];
 
-    // Use Fuse.js for fuzzy searching
+    // Use improved search logic with app name prioritization
     try {
-      // First try exact match on app name or title
-      const exactMatches = windows.filter(
-        (win) =>
-          win.app.toLowerCase().includes(searchText.toLowerCase()) ||
-          win.title.toLowerCase().includes(searchText.toLowerCase()),
+      const searchLower = searchText.toLowerCase();
+
+      // First, get all windows that match in either app name or title
+      const appMatches = windows.filter((win) => win.app.toLowerCase().includes(searchLower));
+      const titleMatches = windows.filter(
+        (win) => win.title.toLowerCase().includes(searchLower) && !win.app.toLowerCase().includes(searchLower), // Exclude if already in app matches
       );
 
-      // If we have exact matches, prioritize them
-      if (exactMatches.length > 0) {
+      // If we have matches, prioritize app name matches over title matches
+      if (appMatches.length > 0 || titleMatches.length > 0) {
         setIsSearching(false);
-        return exactMatches;
+        // Sort app matches by app name length (shorter = more precise)
+        const sortedAppMatches = appMatches.sort((a, b) => {
+          // Exact match comes first
+          const aExact = a.app.toLowerCase() === searchLower;
+          const bExact = b.app.toLowerCase() === searchLower;
+          if (aExact && !bExact) return -1;
+          if (!aExact && bExact) return 1;
+
+          // Then by app name length
+          return a.app.length - b.app.length;
+        });
+
+        // Sort title matches by title length
+        const sortedTitleMatches = titleMatches.sort((a, b) => a.title.length - b.title.length);
+
+        // Return app matches first, then title matches
+        return [...sortedAppMatches, ...sortedTitleMatches];
       }
 
       // Otherwise use fuzzy search
@@ -431,34 +478,16 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
     const windows = [...filteredWindows];
 
     if (sortMethod === SortMethod.USAGE) {
-      // Sort by usage (clicks)
+      // Sort by usage (clicks) - most recent first
       return windows.sort((a, b) => {
         const timeA = usageTimes[a.id] || 0;
         const timeB = usageTimes[b.id] || 0;
         return timeB - timeA;
       });
     } else if (sortMethod === SortMethod.RECENTLY_USED) {
-      // Sort by recently used using usage times instead of focus history
-      // Get the two most recently used windows (by usage timestamp)
-      const recentlyUsedIds = Object.entries(usageTimes)
-        .sort(([, timeA], [, timeB]) => timeB - timeA)
-        .slice(0, 2)
-        .map(([id]) => parseInt(id));
-
-      // Find the corresponding windows
-      const previousWindow = recentlyUsedIds[1] ? windows.find((w) => w.id === recentlyUsedIds[1]) : null; // second most recent
-      const currentWindow = recentlyUsedIds[0] ? windows.find((w) => w.id === recentlyUsedIds[0]) : null;  // most recent
-
+      // Sort by recent focus - most recent first
+      // This gives us: [current, previous, other windows...]
       return windows.sort((a, b) => {
-        // Previous window (second most recently used) comes first
-        if (previousWindow && a.id === previousWindow.id) return -1;
-        if (previousWindow && b.id === previousWindow.id) return 1;
-
-        // Current window (most recently used) comes second
-        if (currentWindow && a.id === currentWindow.id) return -1;
-        if (currentWindow && b.id === currentWindow.id) return 1;
-
-        // For the rest (third position onwards), sort by usage time (most recent first)
         const timeA = usageTimes[a.id] || 0;
         const timeB = usageTimes[b.id] || 0;
         return timeB - timeA;
@@ -471,12 +500,15 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       const timeB = usageTimes[b.id] || 0;
       return timeB - timeA;
     });
-  }, [filteredWindows, usageTimes, sortMethod, focusHistory]);
+  }, [filteredWindows, usageTimes, sortMethod]);
 
-  // Always select the first window in the list
-  const firstWindow = useMemo(() => {
-    return sortedWindows.length > 0 ? sortedWindows[0] : undefined;
+  // Select the second window in the list (previous window) for Alt+Tab behavior
+  // First window = current, Second window = previous (what we want to switch to)
+  const selectedWindow = useMemo(() => {
+    return sortedWindows.length > 1 ? sortedWindows[1] : sortedWindows[0];
   }, [sortedWindows]);
+
+  // No need for focus/blur detection anymore since we only refresh on mount
 
   return (
     <List
@@ -485,12 +517,12 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
       searchBarPlaceholder="Search windows and applications..."
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
-      selectedItemId={firstWindow ? `window-${firstWindow.id}` : undefined} // Select first window by default (index 0)
+      selectedItemId={selectedWindow ? `window-${selectedWindow.id}` : undefined} // Select second window (previous) for Alt+Tab
       actions={
         <ActionPanel>
           <Action
             title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
-            onAction={refreshAllData}
+            onAction={() => refreshAllData(true)}
             shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
           />
         </ActionPanel>
@@ -502,10 +534,17 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
             <List.Item
               key={win.id}
               id={`window-${win.id}`} // Add id for default selection
-              icon={getAppIcon(win, applications)}
-              title={win.app}
+              icon={{
+                ...getAppIcon(win, applications),
+                tintColor: win["has-focus"] || win.focused ? "#10b981" : undefined,
+              }}
+              title={`${win["has-focus"] || win.focused ? "• " : ""}${win.app}`}
               subtitle={win.title}
-              accessories={win["has-focus"] || win.focused ? [{ text: "focused" }] : []}
+              accessories={[
+                { tag: { value: `#${win.display || "?"}`, color: getDisplayColor(win.display) } },
+                ...(win["has-focus"] || win.focused ? [{ tag: { value: "focused", color: "#fbbf24" } }] : []),
+              ]}
+              keywords={win["has-focus"] || win.focused ? ["focused", "current"] : []}
               actions={
                 <WindowActions
                   windowId={win.id}
@@ -522,6 +561,7 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
                   setSortMethod={setSortMethod}
                   onRefresh={refreshAllData}
                   isRefreshing={isRefreshing}
+                  applications={applications}
                 />
               }
             />
@@ -543,11 +583,15 @@ export default function Command(props: { launchContext?: { launchType: LaunchTyp
                     onAction={() => {
                       exec(`open "${app.path}"`);
                     }}
-                    shortcut={{ modifiers: [], key: "enter" }}
+                  />
+                  <Action
+                    title="Open in New Space"
+                    onAction={handleOpenWindowInNewSpace(-1, app.name)}
+                    shortcut={{ modifiers: ["opt"], key: "enter" }}
                   />
                   <Action
                     title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
-                    onAction={refreshAllData}
+                    onAction={() => refreshAllData(true)}
                     shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
                   />
                 </ActionPanel>
@@ -581,6 +625,7 @@ function WindowActions({
   onRefresh,
   isRefreshing,
   isFocused,
+  applications = [],
 }: {
   windowId: number;
   windowApp: string;
@@ -590,12 +635,20 @@ function WindowActions({
   onRefresh: () => void;
   isRefreshing: boolean;
   isFocused?: boolean;
+  applications?: Application[];
 }) {
   return (
     <ActionPanel>
       <Action
         title="Switch to Window"
-        onAction={isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused)}
+        onAction={
+          isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused, applications)
+        }
+      />
+      <Action
+        title="Open in New Space"
+        onAction={handleOpenWindowInNewSpace(windowId, windowApp)}
+        shortcut={{ modifiers: ["opt"], key: "enter" }}
       />
       <Action
         title="Aggregate to Space"
@@ -628,6 +681,25 @@ function WindowActions({
       </ActionPanel.Section>
     </ActionPanel>
   );
+}
+
+function getDisplayColor(displayIndex: number | undefined): string {
+  // Define lighter, subtle colors for different displays
+  const colors = [
+    "#93c5fd", // Light blue for display 1
+    "#86efac", // Light green for display 2
+    "#fca5a5", // Light red for display 3
+    "#c4b5fd", // Light purple for display 4
+    "#fdba74", // Light orange for display 5
+    "#67e8f9", // Light cyan for display 6
+  ];
+
+  if (!displayIndex || displayIndex < 1) {
+    return "#d1d5db"; // Light grey for unknown display
+  }
+
+  // Use modulo to cycle through colors if more than 6 displays
+  return colors[(displayIndex - 1) % colors.length];
 }
 
 function getAppIcon(window: YabaiWindow, applications: Application[]) {
