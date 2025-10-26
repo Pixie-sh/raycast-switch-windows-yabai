@@ -7,6 +7,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { YabaiWindow, YabaiSpace, YabaiDisplay, ENV, YABAI } from "../models";
 import { performanceMonitor } from "./performanceMonitor";
+import { IncompleteJsonError, safeJsonParse } from "./json";
 
 const execAsync = promisify(exec);
 
@@ -50,27 +51,45 @@ class YabaiQueryManager {
       return cacheEntry.data as T;
     }
 
+    const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
     const promise = performanceMonitor.measureAsync(`${type}-query`, async () => {
-      try {
-        const { stdout } = await execAsync(`${YABAI} ${command}`, { env: ENV });
-        const parsed = JSON.parse(stdout) as T;
-        cacheEntry.data = parsed;
-        cacheEntry.timestamp = Date.now();
-        return parsed;
-      } catch (error) {
-        console.error(`Error querying ${type}:`, error);
-        // Return stale data on error if available
-        if (cacheEntry.data) {
-          return cacheEntry.data as T;
+      let attempts = 0;
+      const maxAttempts = 2; // initial + one retry for incomplete output
+      while (attempts < maxAttempts) {
+        attempts++;
+        try {
+          const { stdout } = await execAsync(`${YABAI} ${command}`, { env: ENV, maxBuffer: 10 * 1024 * 1024 });
+          const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
+          const parsed = safeJsonParse<T>(stdoutStr);
+          cacheEntry.data = parsed as unknown as T;
+          cacheEntry.timestamp = Date.now();
+          return parsed;
+        } catch (error) {
+          if (error instanceof IncompleteJsonError && attempts < maxAttempts) {
+            // Short backoff and retry once
+            await sleep(60);
+            continue;
+          }
+          console.error(`Error querying ${type}:`, error);
+          // Return stale data on error if available
+          if (cacheEntry.data) {
+            return cacheEntry.data as T;
+          }
+          throw error;
+        } finally {
+          // inFlight reset handled after loop
         }
-        throw error;
-      } finally {
-        cacheEntry.inFlight = null;
       }
+      // Should not reach here; fallback to cached or throw
+      if (cacheEntry.data) return cacheEntry.data as T;
+      throw new Error(`Failed to query ${type}`);
     });
 
     cacheEntry.inFlight = promise as Promise<unknown>;
-    return promise;
+    const result = await promise;
+    cacheEntry.inFlight = null;
+    return result;
   }
 
   invalidateCache(type?: keyof typeof this.cache): void {

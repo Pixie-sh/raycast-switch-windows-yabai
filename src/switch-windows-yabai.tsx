@@ -18,10 +18,13 @@ import {
   MoveToFocusedDisplayAction,
 } from "./display-actions-yabai";
 import Fuse from "fuse.js";
+import { safeJsonParse, IncompleteJsonError } from "./utils/json";
+import { yabaiQueryManager } from "./utils/yabaiQueryManager";
 import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { parseDisplayFilter, hasDisplayFilterPattern } from "./utils/displayFilter";
 
 const execAsync = promisify(exec);
 
@@ -72,6 +75,18 @@ function useDebounce<T>(value: T, delay: number): T {
   }, [value, delay]);
 
   return debouncedValue;
+}
+
+// Utility function to get unique display numbers from windows
+function getAvailableDisplayNumbers(windows: YabaiWindow[]): number[] {
+  if (!Array.isArray(windows)) return [];
+  
+  const displayNumbers = windows
+    .map(win => win.display)
+    .filter((display): display is number => display !== undefined && display !== null)
+    .sort((a, b) => a - b);
+    
+  return [...new Set(displayNumbers)];
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -139,40 +154,37 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       isRefreshingRef.current = true;
       setIsRefreshing(true);
       try {
-        const { stdout } = await execAsync(`${YABAI} -m query --windows`, { env: ENV });
-        if (stdout) {
-          // Ensure stdout is a string before parsing
-          const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
-          try {
-            const parsed = JSON.parse(stdoutStr);
-            const windowsData = Array.isArray(parsed) ? parsed : [];
+        try {
+          const windowsData = await yabaiQueryManager.queryWindows();
+          // Check if focus has changed
+          const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
+          const newFocusedId = currentlyFocused?.id || null;
+          const previousFocusedId = focusHistory.current;
 
-            // Check if focus has changed
-            const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
-            const newFocusedId = currentlyFocused?.id || null;
-            const previousFocusedId = focusHistory.current;
+          // Always update the windows data to keep the list current
+          setWindows(windowsData);
 
-            // Always update the windows data to keep the list current
-            // But only log focus changes when they occur
-            setWindows(windowsData);
-
-            // Update focus history if changed
-            if (newFocusedId !== previousFocusedId) {
-              updateFocusHistory(windowsData);
-              if (previousFocusedId !== null || newFocusedId !== null) {
-                console.log(`Focus changed from window ${previousFocusedId} to ${newFocusedId}`);
-              }
+          // Update focus history if changed
+          if (newFocusedId !== previousFocusedId) {
+            updateFocusHistory(windowsData);
+            if (previousFocusedId !== null || newFocusedId !== null) {
+              console.log(`Focus changed from window ${previousFocusedId} to ${newFocusedId}`);
             }
+          }
 
-            // Update cache with timestamp
-            const cacheData = {
-              windows: windowsData,
-              timestamp: Date.now(),
-            };
-            await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
-            setLastRefreshTime(Date.now());
-          } catch (parseError) {
-            console.error("Error parsing windows data:", parseError, "Raw data:", stdoutStr);
+          // Update cache with timestamp
+          const cacheData = {
+            windows: windowsData,
+            timestamp: Date.now(),
+          };
+          await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
+          setLastRefreshTime(Date.now());
+        } catch (parseError) {
+          if (parseError instanceof IncompleteJsonError) {
+            // yabai output seems incomplete; skip update and keep previous data
+            console.warn("Incomplete windows JSON from yabai; keeping previous data");
+          } else {
+            console.error("Error parsing windows data:", parseError);
           }
         }
       } catch (error) {
@@ -248,23 +260,10 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   }, [focusHistory]);
 
   // Query windows using useExec - only for initial load
-  const { isLoading, data, error } = useExec<YabaiWindow[]>(YABAI, ["-m", "query", "--windows"], {
-    env: ENV,
-    parseOutput: ({ stdout }) => {
-      if (!stdout) return [];
-      try {
-        // Ensure stdout is a string before parsing
-        const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
-        const parsed = JSON.parse(stdoutStr);
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (parseError) {
-        console.error("Error parsing windows data in useExec:", parseError);
-        return [];
-      }
-    },
-    keepPreviousData: true, // Keep previous data to avoid clearing the list
-    execute: windows.length === 0, // Only execute if we don't have windows yet
-  });
+  // Disable useExec for windows; rely on yabaiQueryManager instead
+  const isLoading = false as const;
+  const data = undefined as unknown as YabaiWindow[] | undefined;
+  const error = undefined as unknown as Error | undefined;
 
   // Load cached windows and handle data changes
   useEffect(() => {
@@ -355,7 +354,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         // Custom sort function to prioritize app matches over title matches
         if (a.score === b.score) {
           // If scores are equal, prioritize shorter app names (more precise)
-          return a.item.app.toString().length - b.item.app.toString().length;
+          const aAppLength = (a.item.app || '').toString().length;
+          const bAppLength = (b.item.app || '').toString().length;
+          return aAppLength - bAppLength;
         }
         return a.score - b.score; // Lower score is better
       },
@@ -375,7 +376,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         // Custom sort function to prioritize exact matches
         if (a.score === b.score) {
           // If scores are equal, prioritize shorter names (more precise)
-          return a.item.name.toString().length - b.item.name.toString().length;
+          const aNameLength = (a.item.name || '').toString().length;
+          const bNameLength = (b.item.name || '').toString().length;
+          return aNameLength - bNameLength;
         }
         return a.score - b.score; // Lower score is better
       },
@@ -400,21 +403,81 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     }
   }, [inputText.length === 1]); // Only trigger when going from 0 to 1 character
 
-  // Filter windows based on the search text using fuzzy search
+  // Filter windows based on the search text using fuzzy search with display filtering support
   const filteredWindows = useMemo(() => {
     if (!Array.isArray(windows)) return [];
     if (!searchText.trim()) return windows; // Return all windows if search text is empty
+    
+    // Special case: if search text is just "#" without a number, keep all windows
+    if (searchText.trim() === '#') return windows;
 
-    if (!fuse) return [];
+    // Parse display filter from search text (e.g., "#3" or "#2 chrome")
+    // Display filter syntax: #N where N is the display number (1-99)
+    // Examples: "#3" (display 3 only), "#2 chrome" (Chrome on display 2)
+    // Note: Filter must be at the start of search text to be recognized
+    const { displayNumber, remainingSearchText, hasDisplayFilter } = parseDisplayFilter(searchText);
+    
+    // Apply display filter first if present (Precedence: Display filter → Text search)
+    // This approach ensures optimal performance by reducing the search space early
+    let windowsToSearch = windows;
+    if (hasDisplayFilter && displayNumber !== null) {
+      windowsToSearch = windows.filter((win) => win.display === displayNumber);
+      
+      // Early return if no windows found on specified display
+      if (windowsToSearch.length === 0) {
+        setIsSearching(false);
+        return [];
+      }
+      
+      // If only display filter (no additional search text), return all windows on that display
+      // This handles cases like "#3" where user wants all windows on display 3
+      if (!remainingSearchText.trim()) {
+        setIsSearching(false);
+        return windowsToSearch;
+      }
+    }
+
+    // If no additional search text after display filter, return filtered windows
+    const effectiveSearchText = remainingSearchText || searchText;
+    if (!effectiveSearchText.trim()) {
+      return windowsToSearch;
+    }
+
+    // Create a temporary Fuse instance for the filtered window set if needed
+    // When display filtering is active, we need a new Fuse instance that only contains
+    // windows from the target display to ensure accurate fuzzy search scoring
+    let searchFuse = fuse;
+    if (hasDisplayFilter && displayNumber !== null && windowsToSearch !== windows) {
+      searchFuse = windowsToSearch.length > 0 ? new Fuse(windowsToSearch, {
+        keys: [
+          { name: "app", weight: 3 }, // Give app name highest weight
+          { name: "title", weight: 1 }, // Lower weight for title
+        ],
+        includeScore: true,
+        threshold: 0.4, // Maintain same search sensitivity
+        ignoreLocation: true,
+        useExtendedSearch: true,
+        sortFn: (a, b) => {
+          if (a.score === b.score) {
+            const aAppLength = (a.item.app || '').toString().length;
+            const bAppLength = (b.item.app || '').toString().length;
+            return aAppLength - bAppLength;
+          }
+          return a.score - b.score;
+        },
+      }) : null;
+    }
+
+    if (!searchFuse) return [];
 
     // Use improved search logic with app name prioritization
     try {
-      const searchLower = searchText.toLowerCase();
+      const searchLower = effectiveSearchText.toLowerCase();
 
       // First, get all windows that match in either app name or title
-      const appMatches = windows.filter((win) => win.app.toLowerCase().includes(searchLower));
-      const titleMatches = windows.filter(
-        (win) => win.title.toLowerCase().includes(searchLower) && !win.app.toLowerCase().includes(searchLower), // Exclude if already in app matches
+      const appMatches = windowsToSearch.filter((win) => (win.app || '').toLowerCase().includes(searchLower));
+      const titleMatches = windowsToSearch.filter(
+        (win) => (win.title || '').toLowerCase().includes(searchLower) && !(win.app || '').toLowerCase().includes(searchLower), // Exclude if already in app matches
       );
 
       // If we have matches, prioritize app name matches over title matches
@@ -423,30 +486,30 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         // Sort app matches by app name length (shorter = more precise)
         const sortedAppMatches = appMatches.sort((a, b) => {
           // Exact match comes first
-          const aExact = a.app.toLowerCase() === searchLower;
-          const bExact = b.app.toLowerCase() === searchLower;
+          const aExact = (a.app || '').toLowerCase() === searchLower;
+          const bExact = (b.app || '').toLowerCase() === searchLower;
           if (aExact && !bExact) return -1;
           if (!aExact && bExact) return 1;
 
           // Then by app name length
-          return a.app.length - b.app.length;
+          return (a.app || '').length - (b.app || '').length;
         });
 
         // Sort title matches by title length
-        const sortedTitleMatches = titleMatches.sort((a, b) => a.title.length - b.title.length);
+        const sortedTitleMatches = titleMatches.sort((a, b) => (a.title || '').length - (b.title || '').length);
 
         // Return app matches first, then title matches
         return [...sortedAppMatches, ...sortedTitleMatches];
       }
 
       // Otherwise use fuzzy search
-      const results = fuse.search(searchText);
+      const results = searchFuse.search(effectiveSearchText);
       setIsSearching(false); // Search is complete
       return results.map((result) => result.item);
     } catch (error) {
       console.error("Error during search:", error);
       setIsSearching(false);
-      return windows; // Fallback to all windows on error
+      return windowsToSearch; // Fallback to filtered windows on error
     }
   }, [windows, searchText, fuse]);
 
@@ -454,13 +517,16 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const filteredApplications = useMemo(() => {
     if (!Array.isArray(applications)) return [];
     if (!searchText.trim()) return applications; // Return all applications if search text is empty
+    
+    // Special case: if search text is just "#" without a number, keep all applications
+    if (searchText.trim() === '#') return applications;
 
     if (!appFuse) return [];
 
     // Use fuzzy search with optimizations
     try {
       // First try exact match on app name
-      const exactMatches = applications.filter((app) => app.name.toLowerCase().includes(searchText.toLowerCase()));
+      const exactMatches = applications.filter((app) => (app.name || '').toLowerCase().includes(searchText.toLowerCase()));
 
       // If we have exact matches, prioritize them
       if (exactMatches.length > 0) {
@@ -522,11 +588,14 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   // No need for focus/blur detection anymore since we only refresh on mount
 
+  // Get available display numbers for filtering actions
+  const availableDisplays = useMemo(() => getAvailableDisplayNumbers(windows), [windows]);
+
   return (
     <List
       isLoading={isLoading || isSearching || isRefreshing}
       onSearchTextChange={setInputText}
-      searchBarPlaceholder="Search windows and applications..."
+      searchBarPlaceholder="Search windows and applications... (Use #3 to filter by display or Opt+Ctrl+3)"
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
       selectedItemId={selectedWindow ? `window-${selectedWindow.id}` : undefined} // Select second window (previous) for Alt+Tab
@@ -537,11 +606,34 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
             onAction={() => refreshAllData(true)}
             shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
           />
+          <ActionPanel.Section title="Display Filters">
+            <Action
+              title="Clear Filter"
+              onAction={() => setInputText("")}
+              shortcut={{ modifiers: ["opt", "ctrl"], key: "0" }}
+            />
+            {availableDisplays.slice(0, 9).map((displayNum) => (
+              <Action
+                key={`filter-display-${displayNum}`}
+                title={`Filter Display #${displayNum}`}
+                onAction={() => setInputText(`#${displayNum}`)}
+                shortcut={{ modifiers: ["opt", "ctrl"], key: displayNum.toString() }}
+              />
+            ))}
+          </ActionPanel.Section>
         </ActionPanel>
       }
     >
       {sortedWindows.length > 0 && (
-        <List.Section title="Windows" subtitle={sortedWindows.length.toString()}>
+        <List.Section 
+          title={(() => {
+            const { displayNumber, hasDisplayFilter } = parseDisplayFilter(searchText);
+            return hasDisplayFilter && displayNumber !== null 
+              ? `Windows (Display #${displayNumber})`
+              : "Windows";
+          })()} 
+          subtitle={sortedWindows.length.toString()}
+        >
           {sortedWindows.map((win) => (
             <List.Item
               key={win.id}
@@ -575,6 +667,8 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                   onRefresh={refreshAllData}
                   isRefreshing={isRefreshing}
                   applications={applications}
+                  setInputText={setInputText}
+                  windows={windows}
                 />
               }
             />
@@ -607,6 +701,21 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                     onAction={() => refreshAllData(true)}
                     shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
                   />
+                  <ActionPanel.Section title="Display Filters">
+                    <Action
+                      title="Clear Filter"
+                      onAction={() => setInputText("")}
+                      shortcut={{ modifiers: ["opt", "ctrl"], key: "0" }}
+                    />
+                    {availableDisplays.slice(0, 9).map((displayNum) => (
+                      <Action
+                        key={`app-filter-display-${displayNum}`}
+                        title={`Filter Display #${displayNum}`}
+                        onAction={() => setInputText(`#${displayNum}`)}
+                        shortcut={{ modifiers: ["opt", "ctrl"], key: displayNum.toString() }}
+                      />
+                    ))}
+                  </ActionPanel.Section>
                 </ActionPanel>
               }
             />
@@ -640,6 +749,8 @@ function WindowActions({
   isRefreshing,
   isFocused,
   applications = [],
+  setInputText,
+  windows,
 }: {
   windowId: number;
   windowApp: string;
@@ -651,7 +762,10 @@ function WindowActions({
   isRefreshing: boolean;
   isFocused?: boolean;
   applications?: Application[];
+  setInputText: (text: string) => void;
+  windows: YabaiWindow[];
 }) {
+  const availableDisplays = useMemo(() => getAvailableDisplayNumbers(windows), [windows]);
   return (
     <ActionPanel>
       <Action
@@ -691,6 +805,21 @@ function WindowActions({
         <DisperseOnDisplayActions />
         <MoveWindowToDisplayActions windowId={windowId} windowApp={windowApp} />
         <MoveToDisplaySpace windowId={windowId} windowApp={windowApp} />
+      </ActionPanel.Section>
+      <ActionPanel.Section title="Display Filters">
+        <Action
+          title="Clear Filter"
+          onAction={() => setInputText("")}
+          shortcut={{ modifiers: ["opt", "ctrl"], key: "0" }}
+        />
+        {availableDisplays.slice(0, 9).map((displayNum) => (
+          <Action
+            key={`filter-display-${displayNum}`}
+            title={`Filter Display #${displayNum}`}
+            onAction={() => setInputText(`#${displayNum}`)}
+            shortcut={{ modifiers: ["opt", "ctrl"], key: displayNum.toString() }}
+          />
+        ))}
       </ActionPanel.Section>
       <ActionPanel.Section title="Sort by">
         <Action title="Sort by Previous" onAction={() => setSortMethod(SortMethod.RECENTLY_USED)} />

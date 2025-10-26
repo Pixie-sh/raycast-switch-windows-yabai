@@ -30,6 +30,21 @@ This extension provides a streamlined interface for managing your windows using 
 3. Use the search bar to filter windows by application name or window title
 4. Select a window and use the actions in the action panel
 
+### Display Filtering
+
+You can filter windows by specific displays using the `#N` syntax:
+
+- **`#3`** - Show only windows on display 3
+- **`#2 chrome`** - Show Chrome windows on display 2
+- **`#1 terminal`** - Show Terminal windows on display 1
+
+**Examples:**
+- Type `#2` to see all windows on display 2
+- Type `#1 code` to find VS Code windows on display 1
+- Type `#3 safari` to find Safari windows on display 3
+
+**Note:** Display filters only work when placed at the beginning of your search. For example, `chrome #2` will search for "chrome #2" as regular text, not filter by display.
+
 ## Notes
 
 - Windows are sorted by most recently used for quick access
