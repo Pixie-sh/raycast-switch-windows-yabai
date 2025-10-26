@@ -722,9 +722,9 @@ export async function validateWindowExists(windowId: number): Promise<boolean> {
 export function getApplicationPath(appName: string, applications: Application[]): string | null {
   const app = applications.find(
     (app) =>
-      (app.name || '').toLowerCase() === appName.toLowerCase() ||
-      (app.name || '').toLowerCase().includes(appName.toLowerCase()) ||
-      appName.toLowerCase().includes((app.name || '').toLowerCase()),
+      (app.name || "").toLowerCase() === appName.toLowerCase() ||
+      (app.name || "").toLowerCase().includes(appName.toLowerCase()) ||
+      appName.toLowerCase().includes((app.name || "").toLowerCase()),
   );
   return app?.path || null;
 }

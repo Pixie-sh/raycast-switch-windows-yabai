@@ -1,8 +1,7 @@
 // TypeScript
 import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage } from "@raycast/api";
-import { useExec } from "@raycast/utils";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
-import { Application, ENV, SortMethod, YABAI, YabaiWindow } from "./models";
+import { Application, ENV, SortMethod, YabaiWindow } from "./models";
 import {
   handleAggregateToSpace,
   handleCloseEmptySpaces,
@@ -18,15 +17,12 @@ import {
   MoveToFocusedDisplayAction,
 } from "./display-actions-yabai";
 import Fuse from "fuse.js";
-import { safeJsonParse, IncompleteJsonError } from "./utils/json";
+import { IncompleteJsonError } from "./utils/json";
 import { yabaiQueryManager } from "./utils/yabaiQueryManager";
 import { existsSync, readdirSync } from "node:fs";
 import * as path from "node:path";
 import { exec } from "node:child_process";
-import { promisify } from "node:util";
-import { parseDisplayFilter, hasDisplayFilterPattern } from "./utils/displayFilter";
-
-const execAsync = promisify(exec);
+import { parseDisplayFilter } from "./utils/displayFilter";
 
 // Function to list applications from standard directories
 function listApplications(): Application[] {
@@ -80,12 +76,12 @@ function useDebounce<T>(value: T, delay: number): T {
 // Utility function to get unique display numbers from windows
 function getAvailableDisplayNumbers(windows: YabaiWindow[]): number[] {
   if (!Array.isArray(windows)) return [];
-  
+
   const displayNumbers = windows
-    .map(win => win.display)
+    .map((win) => win.display)
     .filter((display): display is number => display !== undefined && display !== null)
     .sort((a, b) => a - b);
-    
+
   return [...new Set(displayNumbers)];
 }
 
@@ -354,8 +350,8 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         // Custom sort function to prioritize app matches over title matches
         if (a.score === b.score) {
           // If scores are equal, prioritize shorter app names (more precise)
-          const aAppLength = (a.item.app || '').toString().length;
-          const bAppLength = (b.item.app || '').toString().length;
+          const aAppLength = (a.item.app || "").toString().length;
+          const bAppLength = (b.item.app || "").toString().length;
           return aAppLength - bAppLength;
         }
         return a.score - b.score; // Lower score is better
@@ -376,8 +372,8 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         // Custom sort function to prioritize exact matches
         if (a.score === b.score) {
           // If scores are equal, prioritize shorter names (more precise)
-          const aNameLength = (a.item.name || '').toString().length;
-          const bNameLength = (b.item.name || '').toString().length;
+          const aNameLength = (a.item.name || "").toString().length;
+          const bNameLength = (b.item.name || "").toString().length;
           return aNameLength - bNameLength;
         }
         return a.score - b.score; // Lower score is better
@@ -407,28 +403,28 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const filteredWindows = useMemo(() => {
     if (!Array.isArray(windows)) return [];
     if (!searchText.trim()) return windows; // Return all windows if search text is empty
-    
+
     // Special case: if search text is just "#" without a number, keep all windows
-    if (searchText.trim() === '#') return windows;
+    if (searchText.trim() === "#") return windows;
 
     // Parse display filter from search text (e.g., "#3" or "#2 chrome")
     // Display filter syntax: #N where N is the display number (1-99)
     // Examples: "#3" (display 3 only), "#2 chrome" (Chrome on display 2)
     // Note: Filter must be at the start of search text to be recognized
     const { displayNumber, remainingSearchText, hasDisplayFilter } = parseDisplayFilter(searchText);
-    
+
     // Apply display filter first if present (Precedence: Display filter → Text search)
     // This approach ensures optimal performance by reducing the search space early
     let windowsToSearch = windows;
     if (hasDisplayFilter && displayNumber !== null) {
       windowsToSearch = windows.filter((win) => win.display === displayNumber);
-      
+
       // Early return if no windows found on specified display
       if (windowsToSearch.length === 0) {
         setIsSearching(false);
         return [];
       }
-      
+
       // If only display filter (no additional search text), return all windows on that display
       // This handles cases like "#3" where user wants all windows on display 3
       if (!remainingSearchText.trim()) {
@@ -448,24 +444,27 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     // windows from the target display to ensure accurate fuzzy search scoring
     let searchFuse = fuse;
     if (hasDisplayFilter && displayNumber !== null && windowsToSearch !== windows) {
-      searchFuse = windowsToSearch.length > 0 ? new Fuse(windowsToSearch, {
-        keys: [
-          { name: "app", weight: 3 }, // Give app name highest weight
-          { name: "title", weight: 1 }, // Lower weight for title
-        ],
-        includeScore: true,
-        threshold: 0.4, // Maintain same search sensitivity
-        ignoreLocation: true,
-        useExtendedSearch: true,
-        sortFn: (a, b) => {
-          if (a.score === b.score) {
-            const aAppLength = (a.item.app || '').toString().length;
-            const bAppLength = (b.item.app || '').toString().length;
-            return aAppLength - bAppLength;
-          }
-          return a.score - b.score;
-        },
-      }) : null;
+      searchFuse =
+        windowsToSearch.length > 0
+          ? new Fuse(windowsToSearch, {
+              keys: [
+                { name: "app", weight: 3 }, // Give app name highest weight
+                { name: "title", weight: 1 }, // Lower weight for title
+              ],
+              includeScore: true,
+              threshold: 0.4, // Maintain same search sensitivity
+              ignoreLocation: true,
+              useExtendedSearch: true,
+              sortFn: (a, b) => {
+                if (a.score === b.score) {
+                  const aAppLength = (a.item.app || "").toString().length;
+                  const bAppLength = (b.item.app || "").toString().length;
+                  return aAppLength - bAppLength;
+                }
+                return a.score - b.score;
+              },
+            })
+          : null;
     }
 
     if (!searchFuse) return [];
@@ -475,9 +474,10 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       const searchLower = effectiveSearchText.toLowerCase();
 
       // First, get all windows that match in either app name or title
-      const appMatches = windowsToSearch.filter((win) => (win.app || '').toLowerCase().includes(searchLower));
+      const appMatches = windowsToSearch.filter((win) => (win.app || "").toLowerCase().includes(searchLower));
       const titleMatches = windowsToSearch.filter(
-        (win) => (win.title || '').toLowerCase().includes(searchLower) && !(win.app || '').toLowerCase().includes(searchLower), // Exclude if already in app matches
+        (win) =>
+          (win.title || "").toLowerCase().includes(searchLower) && !(win.app || "").toLowerCase().includes(searchLower), // Exclude if already in app matches
       );
 
       // If we have matches, prioritize app name matches over title matches
@@ -486,17 +486,17 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         // Sort app matches by app name length (shorter = more precise)
         const sortedAppMatches = appMatches.sort((a, b) => {
           // Exact match comes first
-          const aExact = (a.app || '').toLowerCase() === searchLower;
-          const bExact = (b.app || '').toLowerCase() === searchLower;
+          const aExact = (a.app || "").toLowerCase() === searchLower;
+          const bExact = (b.app || "").toLowerCase() === searchLower;
           if (aExact && !bExact) return -1;
           if (!aExact && bExact) return 1;
 
           // Then by app name length
-          return (a.app || '').length - (b.app || '').length;
+          return (a.app || "").length - (b.app || "").length;
         });
 
         // Sort title matches by title length
-        const sortedTitleMatches = titleMatches.sort((a, b) => (a.title || '').length - (b.title || '').length);
+        const sortedTitleMatches = titleMatches.sort((a, b) => (a.title || "").length - (b.title || "").length);
 
         // Return app matches first, then title matches
         return [...sortedAppMatches, ...sortedTitleMatches];
@@ -517,16 +517,18 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const filteredApplications = useMemo(() => {
     if (!Array.isArray(applications)) return [];
     if (!searchText.trim()) return applications; // Return all applications if search text is empty
-    
+
     // Special case: if search text is just "#" without a number, keep all applications
-    if (searchText.trim() === '#') return applications;
+    if (searchText.trim() === "#") return applications;
 
     if (!appFuse) return [];
 
     // Use fuzzy search with optimizations
     try {
       // First try exact match on app name
-      const exactMatches = applications.filter((app) => (app.name || '').toLowerCase().includes(searchText.toLowerCase()));
+      const exactMatches = applications.filter((app) =>
+        (app.name || "").toLowerCase().includes(searchText.toLowerCase()),
+      );
 
       // If we have exact matches, prioritize them
       if (exactMatches.length > 0) {
@@ -625,13 +627,11 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       }
     >
       {sortedWindows.length > 0 && (
-        <List.Section 
+        <List.Section
           title={(() => {
             const { displayNumber, hasDisplayFilter } = parseDisplayFilter(searchText);
-            return hasDisplayFilter && displayNumber !== null 
-              ? `Windows (Display #${displayNumber})`
-              : "Windows";
-          })()} 
+            return hasDisplayFilter && displayNumber !== null ? `Windows (Display #${displayNumber})` : "Windows";
+          })()}
           subtitle={sortedWindows.length.toString()}
         >
           {sortedWindows.map((win) => (

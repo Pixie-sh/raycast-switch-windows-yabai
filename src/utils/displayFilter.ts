@@ -18,22 +18,22 @@ const DISPLAY_FILTER_REGEX = /^#(\d+)\s*/;
 
 /**
  * Parse search text to extract display filter and remaining search terms
- * 
+ *
  * @param searchText - The raw search text from user input
  * @returns DisplayFilterResult containing parsed display number and remaining search text
- * 
+ *
  * @example
- * parseDisplayFilter("#3") 
+ * parseDisplayFilter("#3")
  * // Returns: { displayNumber: 3, remainingSearchText: "", hasDisplayFilter: true }
- * 
+ *
  * @example
  * parseDisplayFilter("#2 chrome")
  * // Returns: { displayNumber: 2, remainingSearchText: "chrome", hasDisplayFilter: true }
- * 
+ *
  * @example
  * parseDisplayFilter("chrome #2")
  * // Returns: { displayNumber: null, remainingSearchText: "chrome #2", hasDisplayFilter: false }
- * 
+ *
  * @example
  * parseDisplayFilter("chrome")
  * // Returns: { displayNumber: null, remainingSearchText: "chrome", hasDisplayFilter: false }
@@ -48,7 +48,7 @@ export function parseDisplayFilter(searchText: string): DisplayFilterResult {
   }
 
   const match = searchText.match(DISPLAY_FILTER_REGEX);
-  
+
   if (!match) {
     // No display filter found, return original search text
     return {
@@ -81,7 +81,7 @@ export function parseDisplayFilter(searchText: string): DisplayFilterResult {
 /**
  * Check if a search text contains a display filter pattern
  * This is a lightweight check without full parsing
- * 
+ *
  * @param searchText - The search text to check
  * @returns boolean indicating if display filter pattern is detected
  */
@@ -92,10 +92,10 @@ export function hasDisplayFilterPattern(searchText: string): boolean {
 /**
  * Get display filter suggestions based on available displays
  * Useful for auto-complete or help text
- * 
+ *
  * @param availableDisplays - Array of display numbers that exist
  * @returns Array of display filter examples
  */
 export function getDisplayFilterSuggestions(availableDisplays: number[]): string[] {
-  return availableDisplays.map(displayNum => `#${displayNum}`);
+  return availableDisplays.map((displayNum) => `#${displayNum}`);
 }

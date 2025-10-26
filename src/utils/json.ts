@@ -7,7 +7,8 @@
  */
 export function stripAnsi(input: string): string {
   // Regex to strip ANSI escape sequences
-  const ansiRegex = /\u001b\[[0-?]*[ -\/]*[@-~]/g;
+  // eslint-disable-next-line no-control-regex
+  const ansiRegex = /\u001b\[[0-?]*[ -/]*[@-~]/g;
   return input.replace(ansiRegex, "");
 }
 
