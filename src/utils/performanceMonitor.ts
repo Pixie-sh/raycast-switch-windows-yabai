@@ -163,10 +163,11 @@ export class PerformanceMonitor {
 
   /**
    * Set up performance monitoring alerts
+   * @returns Cleanup function to clear the interval
    */
-  setupAlerts(): void {
+  setupAlerts(): () => void {
     // Check for performance issues every 30 seconds
-    setInterval(() => {
+    const intervalId = setInterval(() => {
       const thresholds = {
         "app-loading": 100, // 100ms threshold for app loading
         "search-operation": 10, // 10ms threshold for search
@@ -184,13 +185,28 @@ export class PerformanceMonitor {
         }
       });
     }, 30000);
+
+    // Return cleanup function
+    return () => {
+      clearInterval(intervalId);
+    };
   }
 }
 
 // Export singleton instance
 export const performanceMonitor = new PerformanceMonitor();
 
-// Auto-setup alerts in development
+// Auto-setup alerts in development and return cleanup function
+let cleanupAlerts: (() => void) | null = null;
 if (process.env.NODE_ENV === "development") {
-  performanceMonitor.setupAlerts();
+  cleanupAlerts = performanceMonitor.setupAlerts();
+}
+
+// Cleanup on module unload (if supported)
+if (typeof process !== "undefined" && process.on) {
+  process.on("exit", () => {
+    if (cleanupAlerts) {
+      cleanupAlerts();
+    }
+  });
 }

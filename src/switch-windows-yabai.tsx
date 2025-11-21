@@ -19,13 +19,14 @@ import {
 import Fuse from "fuse.js";
 import { IncompleteJsonError } from "./utils/json";
 import { yabaiQueryManager } from "./utils/yabaiQueryManager";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import * as path from "node:path";
 import { exec } from "node:child_process";
 import { parseDisplayFilter } from "./utils/displayFilter";
 
-// Function to list applications from standard directories
-function listApplications(): Application[] {
+// Function to list applications from standard directories (async for better performance)
+async function listApplications(): Promise<Application[]> {
   const applications: Application[] = [];
   const appDirectories = [
     "/Applications",
@@ -34,22 +35,25 @@ function listApplications(): Application[] {
     "/System/Library/CoreServices",
   ];
 
-  for (const dir of appDirectories) {
-    if (existsSync(dir)) {
-      try {
-        const files = readdirSync(dir);
-        for (const file of files) {
-          if (file.endsWith(".app")) {
-            const appPath = path.join(dir, file);
-            const appName = file.replace(".app", "");
-            applications.push({ name: appName, path: appPath });
+  // Process directories in parallel for faster loading
+  await Promise.all(
+    appDirectories.map(async (dir) => {
+      if (existsSync(dir)) {
+        try {
+          const files = await readdir(dir);
+          for (const file of files) {
+            if (file.endsWith(".app")) {
+              const appPath = path.join(dir, file);
+              const appName = file.replace(".app", "");
+              applications.push({ name: appName, path: appPath });
+            }
           }
+        } catch (error) {
+          console.error(`Error reading directory ${dir}:`, error);
         }
-      } catch (error) {
-        console.error(`Error reading directory ${dir}:`, error);
       }
-    }
-  }
+    }),
+  );
 
   return applications;
 }
@@ -125,7 +129,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   const refreshApplications = useCallback(async () => {
     try {
-      const freshApps = listApplications();
+      const freshApps = await listApplications();
       setApplications(freshApps);
 
       // Update the cache
@@ -240,19 +244,31 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     })();
   }, []);
 
-  // Persist usage times in local storage when they change.
+  // Persist usage times in local storage when they change (debounced to reduce I/O)
   useEffect(() => {
-    LocalStorage.setItem("usageTimes", JSON.stringify(usageTimes));
+    const timeoutId = setTimeout(() => {
+      LocalStorage.setItem("usageTimes", JSON.stringify(usageTimes));
+    }, 500); // Debounce for 500ms
+
+    return () => clearTimeout(timeoutId);
   }, [usageTimes]);
 
-  // Persist sort method in local storage when it changes.
+  // Persist sort method in local storage when it changes (debounced to reduce I/O)
   useEffect(() => {
-    LocalStorage.setItem("sortMethod", JSON.stringify(sortMethod));
+    const timeoutId = setTimeout(() => {
+      LocalStorage.setItem("sortMethod", JSON.stringify(sortMethod));
+    }, 500); // Debounce for 500ms
+
+    return () => clearTimeout(timeoutId);
   }, [sortMethod]);
 
-  // Persist focus history in local storage when it changes.
+  // Persist focus history in local storage when it changes (debounced to reduce I/O)
   useEffect(() => {
-    LocalStorage.setItem("focusHistory", JSON.stringify(focusHistory));
+    const timeoutId = setTimeout(() => {
+      LocalStorage.setItem("focusHistory", JSON.stringify(focusHistory));
+    }, 500); // Debounce for 500ms
+
+    return () => clearTimeout(timeoutId);
   }, [focusHistory]);
 
   // Query windows using useExec - only for initial load
@@ -306,18 +322,32 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   // Initial refresh when extension opens
   useEffect(() => {
-    console.log("Extension mounted, refreshing all data");
-    refreshAllData(true);
-  }, []); // Empty dependency array - only run once per mount
+    let isMounted = true;
+
+    const initialize = async () => {
+      if (isMounted) {
+        console.log("Extension mounted, refreshing all data");
+        await refreshAllData(true);
+      }
+    };
+
+    initialize();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [refreshAllData]); // Include refreshAllData in dependencies
 
   // No background polling - rely on manual refresh to avoid flickering
 
   // Load applications when the component mounts
   useEffect(() => {
+    let isMounted = true;
+
     const loadApplications = async () => {
       // Try to load from cache first
       const cachedApps = await LocalStorage.getItem<string>("cachedApplications");
-      if (cachedApps) {
+      if (cachedApps && isMounted) {
         try {
           const parsedApps = JSON.parse(cachedApps);
           setApplications(parsedApps);
@@ -328,10 +358,16 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       }
 
       // Then refresh the applications list
-      await refreshApplications();
+      if (isMounted) {
+        await refreshApplications();
+      }
     };
 
     loadApplications();
+
+    return () => {
+      isMounted = false;
+    };
   }, [refreshApplications]);
 
   // Create a Fuse instance for fuzzy searching windows
@@ -391,13 +427,22 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   }, [inputText, searchText]);
 
   // Refresh windows when user starts typing (only on first character)
+  const prevInputLengthRef = useRef(0);
   useEffect(() => {
-    if (inputText.length === 1) {
-      // User just started typing, refresh the windows
+    const prevLength = prevInputLengthRef.current;
+    const currentLength = inputText.length;
+
+    // Only trigger when going from 0 to 1 character (user just started typing)
+    if (prevLength === 0 && currentLength === 1) {
       console.log("User started searching, refreshing windows");
       refreshWindows(false);
     }
-  }, [inputText.length === 1]); // Only trigger when going from 0 to 1 character
+
+    prevInputLengthRef.current = currentLength;
+  }, [inputText, refreshWindows]);
+
+  // Cache for display-filtered Fuse instances to avoid recreating them
+  const displayFilteredFuseCache = useRef<Map<string, Fuse<YabaiWindow>>>(new Map());
 
   // Filter windows based on the search text using fuzzy search with display filtering support
   const filteredWindows = useMemo(() => {
@@ -439,32 +484,47 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       return windowsToSearch;
     }
 
-    // Create a temporary Fuse instance for the filtered window set if needed
-    // When display filtering is active, we need a new Fuse instance that only contains
-    // windows from the target display to ensure accurate fuzzy search scoring
+    // Get or create a Fuse instance for the filtered window set
+    // Use caching to avoid recreating Fuse instances for the same display
     let searchFuse = fuse;
     if (hasDisplayFilter && displayNumber !== null && windowsToSearch !== windows) {
-      searchFuse =
-        windowsToSearch.length > 0
-          ? new Fuse(windowsToSearch, {
-              keys: [
-                { name: "app", weight: 3 }, // Give app name highest weight
-                { name: "title", weight: 1 }, // Lower weight for title
-              ],
-              includeScore: true,
-              threshold: 0.4, // Maintain same search sensitivity
-              ignoreLocation: true,
-              useExtendedSearch: true,
-              sortFn: (a, b) => {
-                if (a.score === b.score) {
-                  const aAppLength = (a.item.app || "").toString().length;
-                  const bAppLength = (b.item.app || "").toString().length;
-                  return aAppLength - bAppLength;
-                }
-                return a.score - b.score;
-              },
-            })
-          : null;
+      if (windowsToSearch.length > 0) {
+        const cacheKey = `display-${displayNumber}-${windowsToSearch.length}`;
+        let cachedFuse = displayFilteredFuseCache.current.get(cacheKey);
+
+        if (!cachedFuse) {
+          cachedFuse = new Fuse(windowsToSearch, {
+            keys: [
+              { name: "app", weight: 3 }, // Give app name highest weight
+              { name: "title", weight: 1 }, // Lower weight for title
+            ],
+            includeScore: true,
+            threshold: 0.4, // Maintain same search sensitivity
+            ignoreLocation: true,
+            useExtendedSearch: true,
+            sortFn: (a, b) => {
+              if (a.score === b.score) {
+                const aAppLength = (a.item.app || "").toString().length;
+                const bAppLength = (b.item.app || "").toString().length;
+                return aAppLength - bAppLength;
+              }
+              return a.score - b.score;
+            },
+          });
+          displayFilteredFuseCache.current.set(cacheKey, cachedFuse);
+
+          // Limit cache size to prevent memory leaks
+          if (displayFilteredFuseCache.current.size > 10) {
+            const firstKey = displayFilteredFuseCache.current.keys().next().value;
+            if (firstKey) {
+              displayFilteredFuseCache.current.delete(firstKey);
+            }
+          }
+        }
+        searchFuse = cachedFuse;
+      } else {
+        searchFuse = null;
+      }
     }
 
     if (!searchFuse) return [];
@@ -532,17 +592,14 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
       // If we have exact matches, prioritize them
       if (exactMatches.length > 0) {
-        setIsSearching(false);
         return exactMatches;
       }
 
       // Otherwise use fuzzy search
       const results = appFuse.search(searchText);
-      setIsSearching(false); // Search is complete
       return results.map((result) => result.item);
     } catch (error) {
       console.error("Error during application search:", error);
-      setIsSearching(false);
       return applications; // Fallback to all applications on error
     }
   }, [applications, searchText, appFuse]);
@@ -619,7 +676,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                 key={`filter-display-${displayNum}`}
                 title={`Filter Display #${displayNum}`}
                 onAction={() => setInputText(`#${displayNum}`)}
-                shortcut={{ modifiers: ["opt", "ctrl"], key: displayNum.toString() }}
+                shortcut={{ modifiers: ["opt", "ctrl"], key: String(displayNum) as never }}
               />
             ))}
           </ActionPanel.Section>
@@ -712,7 +769,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                         key={`app-filter-display-${displayNum}`}
                         title={`Filter Display #${displayNum}`}
                         onAction={() => setInputText(`#${displayNum}`)}
-                        shortcut={{ modifiers: ["opt", "ctrl"], key: displayNum.toString() }}
+                        shortcut={{ modifiers: ["opt", "ctrl"], key: String(displayNum) as never }}
                       />
                     ))}
                   </ActionPanel.Section>
@@ -817,7 +874,7 @@ function WindowActions({
             key={`filter-display-${displayNum}`}
             title={`Filter Display #${displayNum}`}
             onAction={() => setInputText(`#${displayNum}`)}
-            shortcut={{ modifiers: ["opt", "ctrl"], key: displayNum.toString() }}
+            shortcut={{ modifiers: ["opt", "ctrl"], key: String(displayNum) as never }}
           />
         ))}
       </ActionPanel.Section>
