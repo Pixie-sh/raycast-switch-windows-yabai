@@ -34,6 +34,10 @@ import {
   getAvailableDisplays,
   handleInteractiveMoveToDisplay,
   handleMoveToFocusedDisplay,
+  handleCreateSpace,
+  handleDestroySpace,
+  handleFocusNextSpace,
+  handleFocusPreviousSpace,
 } from "./handlers";
 import { ENV, YABAI, DisplayInfo } from "./models";
 import KeyEquivalent = Keyboard.KeyEquivalent;
@@ -243,5 +247,40 @@ export function MoveToFocusedDisplayAction({ windowId, windowApp }: MoveToFocuse
       onAction={handleMoveToFocusedDisplay(windowId, windowApp)}
       shortcut={{ modifiers: ["cmd", "shift"], key: "f" }}
     />
+  );
+}
+
+/**
+ * Space management actions component
+ * Provides actions to create, destroy, and navigate spaces
+ */
+export function SpaceManagementActions() {
+  return (
+    <>
+      <Action
+        icon={Icon.Plus}
+        title="Create New Space"
+        onAction={handleCreateSpace()}
+        shortcut={{ modifiers: ["cmd", "ctrl"], key: "n" }}
+      />
+      <Action
+        icon={Icon.Trash}
+        title="Destroy Current Space"
+        onAction={handleDestroySpace()}
+        shortcut={{ modifiers: ["cmd", "ctrl"], key: "backspace" }}
+      />
+      <Action
+        icon={Icon.ArrowRight}
+        title="Focus Next Space"
+        onAction={handleFocusNextSpace()}
+        shortcut={{ modifiers: ["ctrl"], key: "arrowRight" }}
+      />
+      <Action
+        icon={Icon.ArrowLeft}
+        title="Focus Previous Space"
+        onAction={handleFocusPreviousSpace()}
+        shortcut={{ modifiers: ["ctrl"], key: "arrowLeft" }}
+      />
+    </>
   );
 }

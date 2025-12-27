@@ -15,6 +15,7 @@ import {
   MoveWindowToDisplayActions,
   InteractiveMoveToDisplayAction,
   MoveToFocusedDisplayAction,
+  SpaceManagementActions,
 } from "./display-actions-yabai";
 import Fuse from "fuse.js";
 import { IncompleteJsonError } from "./utils/json";
@@ -30,8 +31,10 @@ async function listApplications(): Promise<Application[]> {
   const applications: Application[] = [];
   const appDirectories = [
     "/Applications",
+    "/Applications/Utilities",
     path.join(ENV.HOME, "Applications"),
     "/System/Applications",
+    "/System/Applications/Utilities",
     "/System/Library/CoreServices",
   ];
 
@@ -665,6 +668,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
             onAction={() => refreshAllData(true)}
             shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
           />
+          <ActionPanel.Section title="Space Management">
+            <SpaceManagementActions />
+          </ActionPanel.Section>
           <ActionPanel.Section title="Display Filters">
             <Action
               title="Clear Filter"
@@ -862,6 +868,9 @@ function WindowActions({
         <DisperseOnDisplayActions />
         <MoveWindowToDisplayActions windowId={windowId} windowApp={windowApp} />
         <MoveToDisplaySpace windowId={windowId} windowApp={windowApp} />
+      </ActionPanel.Section>
+      <ActionPanel.Section title="Space Management">
+        <SpaceManagementActions />
       </ActionPanel.Section>
       <ActionPanel.Section title="Display Filters">
         <Action

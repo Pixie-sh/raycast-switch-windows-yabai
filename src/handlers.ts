@@ -989,3 +989,178 @@ export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) 
     }
   };
 };
+
+// Space Management Functions
+
+/**
+ * Create a new space on the currently focused display
+ */
+export const handleCreateSpace = () => {
+  return async () => {
+    await showToast({
+      style: Toast.Style.Animated,
+      title: "Creating New Space...",
+    });
+
+    try {
+      // Get the currently focused display
+      const displayResult = await execFilePromise(YABAI, ["-m", "query", "--displays", "--display"], {
+        env: ENV,
+      });
+      const currentDisplay = parseExecOutput<YabaiDisplay>(displayResult.stdout);
+
+      // Create a new space
+      const { stderr } = await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
+
+      if (stderr?.trim()) {
+        console.error(`Error creating space: ${stderr.trim()}`);
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Failed to Create Space",
+          message: stderr.trim(),
+        });
+        return;
+      }
+
+      // Query spaces to get the newly created space
+      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
+      const allSpaces = parseExecOutput<YabaiSpace[]>(spacesResult.stdout);
+
+      // Find the newly created space on the current display
+      const spacesOnDisplay = allSpaces.filter((space) => space.display === currentDisplay.index);
+      const newSpace = spacesOnDisplay.sort((a, b) => b.index - a.index)[0];
+
+      if (newSpace) {
+        console.log(`Created new space ${newSpace.index} on display ${currentDisplay.index}`);
+        await showToast({
+          style: Toast.Style.Success,
+          title: "Space Created",
+          message: `New space ${newSpace.index} created on Display ${currentDisplay.index}`,
+        });
+      } else {
+        console.log(`Space created on display ${currentDisplay.index}`);
+        await showToast({
+          style: Toast.Style.Success,
+          title: "Space Created",
+          message: `New space created on Display ${currentDisplay.index}`,
+        });
+      }
+    } catch (error: unknown) {
+      console.error("Create space failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Failed to Create Space",
+        message: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    }
+  };
+};
+
+/**
+ * Destroy (delete) the currently focused space
+ */
+export const handleDestroySpace = () => {
+  return async () => {
+    await showToast({
+      style: Toast.Style.Animated,
+      title: "Destroying Space...",
+    });
+
+    try {
+      // Get the currently focused space
+      const spaceResult = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--space"], {
+        env: ENV,
+      });
+      const currentSpace = parseExecOutput<YabaiSpace>(spaceResult.stdout);
+
+      // Check if the space has windows
+      if (currentSpace.windows && currentSpace.windows.length > 0) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Cannot Destroy Space",
+          message: `Space ${currentSpace.index} has ${currentSpace.windows.length} window(s). Close or move them first.`,
+        });
+        return;
+      }
+
+      const spaceIndex = currentSpace.index;
+
+      // Destroy the space
+      const { stderr } = await execFilePromise(YABAI, ["-m", "space", "--destroy"], { env: ENV });
+
+      if (stderr?.trim()) {
+        console.error(`Error destroying space ${spaceIndex}: ${stderr.trim()}`);
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Failed to Destroy Space",
+          message: stderr.trim(),
+        });
+        return;
+      }
+
+      console.log(`Successfully destroyed space ${spaceIndex}`);
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Space Destroyed",
+        message: `Space ${spaceIndex} has been removed`,
+      });
+    } catch (error: unknown) {
+      console.error("Destroy space failed:", error);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Failed to Destroy Space",
+        message: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    }
+  };
+};
+
+/**
+ * Focus next space (with wraparound)
+ */
+export const handleFocusNextSpace = () => {
+  return async () => {
+    try {
+      // Try to focus next space
+      const { stderr } = await execFilePromise(YABAI, ["-m", "space", "--focus", "next"], { env: ENV });
+
+      // If next space doesn't exist, wrap to first space
+      if (stderr?.trim()) {
+        await execFilePromise(YABAI, ["-m", "space", "--focus", "first"], { env: ENV });
+      }
+    } catch (error: unknown) {
+      console.error("Focus next space failed:", error);
+      // Try to focus first space as fallback
+      try {
+        await execFilePromise(YABAI, ["-m", "space", "--focus", "first"], { env: ENV });
+      } catch (fallbackError) {
+        console.error("Fallback to first space also failed:", fallbackError);
+      }
+    }
+  };
+};
+
+/**
+ * Focus previous space (with wraparound)
+ */
+export const handleFocusPreviousSpace = () => {
+  return async () => {
+    try {
+      // Try to focus previous space
+      const { stderr } = await execFilePromise(YABAI, ["-m", "space", "--focus", "prev"], { env: ENV });
+
+      // If previous space doesn't exist, wrap to last space
+      if (stderr?.trim()) {
+        await execFilePromise(YABAI, ["-m", "space", "--focus", "last"], { env: ENV });
+      }
+    } catch (error: unknown) {
+      console.error("Focus previous space failed:", error);
+      // Try to focus last space as fallback
+      try {
+        await execFilePromise(YABAI, ["-m", "space", "--focus", "last"], { env: ENV });
+      } catch (fallbackError) {
+        console.error("Fallback to last space also failed:", fallbackError);
+      }
+    }
+  };
+};
