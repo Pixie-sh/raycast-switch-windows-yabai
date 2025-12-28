@@ -12,6 +12,30 @@ function parseExecOutput<T>(output: string | Buffer): T {
   return JSON.parse(str) as T;
 }
 
+/**
+ * Check if an application is a utility app that requires executable launch
+ * Utility apps often can't be focused by yabai due to macOS restrictions
+ */
+function isUtilityApp(appName: string): boolean {
+  const utilityApps = [
+    "Activity Monitor",
+    "Console",
+    "Disk Utility",
+    "Terminal",
+    "System Information",
+    "Network Utility",
+    "Keychain Access",
+    "Migration Assistant",
+    "ColorSync Utility",
+    "VoiceOver Utility",
+    "Audio MIDI Setup",
+    "Bluetooth File Exchange",
+    "AirPort Utility",
+    "Grapher",
+  ];
+  return utilityApps.some((utilityApp) => appName.toLowerCase().includes(utilityApp.toLowerCase()));
+}
+
 // Focus a window with intelligent fallback to application launch.
 export const handleFocusWindow = (
   windowId: number,
@@ -21,6 +45,33 @@ export const handleFocusWindow = (
 ) => {
   return async () => {
     await showToast({ style: Toast.Style.Animated, title: "Focusing Window..." });
+
+    // Check if this is a utility app that requires special handling
+    const isUtility = isUtilityApp(windowApp);
+
+    if (isUtility) {
+      console.log(`${windowApp} is a utility app, launching executable instead of focusing window`);
+      await showToast({ style: Toast.Style.Animated, title: `Launching ${windowApp}...` });
+
+      try {
+        const strategy = await launchOrFocusApplication(windowApp, applications);
+        await showToast({
+          style: Toast.Style.Success,
+          title: `${windowApp} activated`,
+          message: `Used ${strategy} (utility app)`,
+        });
+        onFocused(windowId);
+      } catch (launchError) {
+        console.error(`Failed to launch utility app ${windowApp}:`, launchError);
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Failed to Activate Utility App",
+          message: `Could not launch ${windowApp}: ${launchError instanceof Error ? launchError.message : "Unknown error"}`,
+        });
+      }
+      return;
+    }
+
     try {
       const { stderr } = await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--focus"], {
         env: ENV,
