@@ -1,5 +1,5 @@
 // TypeScript
-import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage } from "@raycast/api";
+import { Action, ActionPanel, closeMainWindow, Icon, LaunchType, List, LocalStorage } from "@raycast/api";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Application, BrowserTab, BrowserType, ENV, SortMethod, YabaiWindow } from "./models";
 import {
@@ -64,6 +64,23 @@ function getBrowserIcon(browser: BrowserType): string {
       return "firefox";
     default:
       return "globe"; // Chrome and other Chromium-based browsers
+  }
+}
+
+/**
+ * Get favicon URL for a tab using Google's favicon service
+ * Falls back to browser icon if URL is invalid
+ */
+function getFaviconUrl(tab: BrowserTab): string | undefined {
+  if (!tab.url || tab.url === "about:blank" || tab.url.startsWith("chrome://") || tab.url.startsWith("about:")) {
+    return undefined; // Will use fallback icon
+  }
+  try {
+    const url = new URL(tab.url);
+    // Use Google's favicon service - reliable and fast
+    return `https://www.google.com/s2/favicons?domain=${url.hostname}&sz=64`;
+  } catch {
+    return undefined;
   }
 }
 
@@ -936,7 +953,10 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
             <List.Item
               key={tab.id}
               id={`tab-${tab.id}`}
-              icon={{ source: getBrowserIcon(tab.browser) }}
+              icon={{
+                source: getFaviconUrl(tab) || getBrowserIcon(tab.browser),
+                fallback: Icon.Globe,
+              }}
               title={tab.title || "Untitled"}
               subtitle={tab.domain}
               accessories={[
@@ -946,6 +966,11 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
               actions={
                 <ActionPanel>
                   <Action title="Switch to Tab" onAction={handleFocusBrowserTab(tab, () => closeMainWindow())} />
+                  <Action.CopyToClipboard
+                    title="Copy URL"
+                    content={tab.url}
+                    shortcut={{ modifiers: ["cmd", "shift"], key: "c" }}
+                  />
                   <Action
                     title="Close Tab"
                     onAction={handleCloseBrowserTab(tab, () => {
