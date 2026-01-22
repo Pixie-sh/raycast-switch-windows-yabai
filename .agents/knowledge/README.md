@@ -11,6 +11,7 @@ This directory contains accumulated knowledge and patterns from building and opt
 ### Integration Guides  
 - **[yabai_integration.md](./yabai_integration.md)** - Yabai integration patterns and external process management
 - **[window_management.md](./window_management.md)** - Window management strategies and behaviors
+- **[browser_tab_search.md](./browser_tab_search.md)** - Browser tab search via AppleScript and focus tracking with yabai signals
 
 ### Standards
 - **[typescript_standards.md](./typescript_standards.md)** - TypeScript coding standards and conventions
@@ -24,6 +25,7 @@ If you're new to the codebase, read in this order:
 2. **react_raycast_patterns.md** - Learn React/Raycast patterns
 3. **performance_patterns.md** - Apply performance best practices
 4. **yabai_integration.md** - Integrate with yabai
+5. **browser_tab_search.md** - Browser tabs & focus tracking
 
 ## 🔥 Recent Updates (Nov 2024)
 
@@ -84,5 +86,5 @@ When you learn something new or solve a problem:
 
 ---
 
-**Last Updated:** November 2024  
+**Last Updated:** January 2026  
 **Status:** Active development, well-optimized

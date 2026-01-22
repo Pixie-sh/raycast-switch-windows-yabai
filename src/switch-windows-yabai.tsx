@@ -1,13 +1,15 @@
 // TypeScript
 import { Action, ActionPanel, closeMainWindow, LaunchType, List, LocalStorage } from "@raycast/api";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
-import { Application, ENV, SortMethod, YabaiWindow } from "./models";
+import { Application, BrowserTab, BrowserType, ENV, SortMethod, YabaiWindow } from "./models";
 import {
   handleAggregateToSpace,
   handleCloseEmptySpaces,
   handleCloseWindow,
   handleFocusWindow,
   handleOpenWindowInNewSpace,
+  handleFocusBrowserTab,
+  handleCloseBrowserTab,
 } from "./handlers";
 import {
   DisperseOnDisplayActions,
@@ -20,11 +22,50 @@ import {
 import Fuse from "fuse.js";
 import { IncompleteJsonError } from "./utils/json";
 import { yabaiQueryManager } from "./utils/yabaiQueryManager";
+import { browserTabManager } from "./utils/browserTabManager";
+// Focus history manager is available for future integration with yabai signals
+// import { focusHistoryManager, getMergedFocusTimes } from "./utils/focusHistoryManager";
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import * as path from "node:path";
 import { exec } from "node:child_process";
 import { parseDisplayFilter } from "./utils/displayFilter";
+
+/**
+ * Parse tab search prefix from search text
+ * Format: @<search_term> or just @ for all tabs
+ * Example: "@github" searches tabs with "github" in title/URL
+ */
+function parseTabFilter(searchText: string): {
+  hasTabFilter: boolean;
+  remainingSearchText: string;
+} {
+  const trimmed = searchText.trim();
+  if (trimmed.startsWith("@")) {
+    return {
+      hasTabFilter: true,
+      remainingSearchText: trimmed.slice(1).trim(),
+    };
+  }
+  return {
+    hasTabFilter: false,
+    remainingSearchText: searchText,
+  };
+}
+
+/**
+ * Get browser icon source based on browser type
+ */
+function getBrowserIcon(browser: BrowserType): string {
+  switch (browser) {
+    case BrowserType.SAFARI:
+      return "safari";
+    case BrowserType.FIREFOX:
+      return "firefox";
+    default:
+      return "globe"; // Chrome and other Chromium-based browsers
+  }
+}
 
 // Function to list applications from standard directories (async for better performance)
 async function listApplications(): Promise<Application[]> {
@@ -109,6 +150,11 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     current: number | null;
     previous: number | null;
   }>({ current: null, previous: null });
+
+  // Browser tabs state
+  const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([]);
+  const [isLoadingTabs, setIsLoadingTabs] = useState(false);
+  const tabsLoadedRef = useRef(false);
 
   // Function to remove a window from the local listing after it's closed.
   const removeWindow = useCallback((id: number) => {
@@ -429,6 +475,104 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     }
   }, [inputText, searchText]);
 
+  // Load browser tabs on mount (like Spotlight behavior)
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadTabs = async () => {
+      if (tabsLoadedRef.current) return;
+
+      setIsLoadingTabs(true);
+      tabsLoadedRef.current = true;
+
+      try {
+        const tabs = await browserTabManager.queryAllTabs();
+        if (isMounted) {
+          setBrowserTabs(tabs);
+          console.log(`Loaded ${tabs.length} browser tabs`);
+        }
+      } catch (error) {
+        console.error("Error loading browser tabs:", error);
+      } finally {
+        if (isMounted) {
+          setIsLoadingTabs(false);
+        }
+      }
+    };
+
+    loadTabs();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Create Fuse instance for browser tabs
+  const tabFuse = useMemo(() => {
+    if (!Array.isArray(browserTabs) || browserTabs.length === 0) return null;
+    return new Fuse(browserTabs, {
+      keys: [
+        { name: "title", weight: 3 },
+        { name: "domain", weight: 2 },
+        { name: "url", weight: 1 },
+      ],
+      includeScore: true,
+      threshold: 0.4,
+      ignoreLocation: true,
+      useExtendedSearch: true,
+    });
+  }, [browserTabs]);
+
+  // Filter browser tabs based on search text (Spotlight-like behavior)
+  // @ prefix = show ONLY tabs, otherwise show tabs along with windows/apps
+  const filteredTabs = useMemo(() => {
+    const { hasTabFilter, remainingSearchText } = parseTabFilter(searchText);
+
+    if (!Array.isArray(browserTabs) || browserTabs.length === 0) return [];
+
+    // Determine the effective search text
+    const effectiveSearch = hasTabFilter ? remainingSearchText : searchText;
+
+    // If @ with no search term, return all tabs
+    // If no search at all (empty), don't show tabs (only show when searching)
+    if (hasTabFilter && !effectiveSearch.trim()) return browserTabs;
+    if (!effectiveSearch.trim()) return [];
+
+    // Skip tabs if display filter is active (tabs don't have displays)
+    const { hasDisplayFilter } = parseDisplayFilter(searchText);
+    if (hasDisplayFilter && !hasTabFilter) return [];
+
+    // Search in title, domain, and URL
+    const searchLower = effectiveSearch.toLowerCase();
+
+    // First try exact substring matches
+    const exactMatches = browserTabs.filter(
+      (tab) =>
+        tab.title.toLowerCase().includes(searchLower) ||
+        tab.domain.toLowerCase().includes(searchLower) ||
+        tab.url.toLowerCase().includes(searchLower),
+    );
+
+    if (exactMatches.length > 0) {
+      return exactMatches.sort((a, b) => {
+        // Prioritize title matches over domain/URL matches
+        const aInTitle = a.title.toLowerCase().includes(searchLower);
+        const bInTitle = b.title.toLowerCase().includes(searchLower);
+        if (aInTitle && !bInTitle) return -1;
+        if (!aInTitle && bInTitle) return 1;
+        return 0;
+      });
+    }
+
+    // Fall back to fuzzy search
+    if (tabFuse) {
+      const results = tabFuse.search(effectiveSearch);
+      return results.map((r) => r.item);
+    }
+
+    return [];
+  }, [browserTabs, searchText, tabFuse]);
+
   // Refresh windows when user starts typing (only on first character)
   const prevInputLengthRef = useRef(0);
   useEffect(() => {
@@ -655,9 +799,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   return (
     <List
-      isLoading={isLoading || isSearching || isRefreshing}
+      isLoading={isLoading || isSearching || isRefreshing || isLoadingTabs}
       onSearchTextChange={setInputText}
-      searchBarPlaceholder="Search windows and applications... (Use #3 to filter by display or Opt+Ctrl+3)"
+      searchBarPlaceholder="Search windows, apps, and browser tabs... (#3 for display, @ for tabs only)"
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
       selectedItemId={selectedWindow ? `window-${selectedWindow.id}` : undefined} // Select second window (previous) for Alt+Tab
@@ -689,7 +833,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </ActionPanel>
       }
     >
-      {sortedWindows.length > 0 && (
+      {sortedWindows.length > 0 && !parseTabFilter(searchText).hasTabFilter && (
         <List.Section
           title={(() => {
             const { displayNumber, hasDisplayFilter } = parseDisplayFilter(searchText);
@@ -739,7 +883,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </List.Section>
       )}
 
-      {filteredApplications.length > 0 && (
+      {filteredApplications.length > 0 && !parseTabFilter(searchText).hasTabFilter && (
         <List.Section title="Applications" subtitle={filteredApplications.length.toString()}>
           {filteredApplications.map((app) => (
             <List.Item
@@ -786,8 +930,63 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </List.Section>
       )}
 
-      {!isLoading && sortedWindows.length === 0 && filteredApplications.length === 0 && (
-        <List.EmptyView title="No Windows or Applications Found" description="No windows or applications were found." />
+      {filteredTabs.length > 0 && (
+        <List.Section title="Browser Tabs" subtitle={filteredTabs.length.toString()}>
+          {filteredTabs.map((tab) => (
+            <List.Item
+              key={tab.id}
+              id={`tab-${tab.id}`}
+              icon={{ source: getBrowserIcon(tab.browser) }}
+              title={tab.title || "Untitled"}
+              subtitle={tab.domain}
+              accessories={[
+                { tag: { value: tab.browser.split(" ")[0], color: getBrowserColor(tab.browser) } },
+                ...(tab.isActive ? [{ tag: { value: "active", color: "#10b981" } }] : []),
+              ]}
+              actions={
+                <ActionPanel>
+                  <Action title="Switch to Tab" onAction={handleFocusBrowserTab(tab, () => closeMainWindow())} />
+                  <Action
+                    title="Close Tab"
+                    onAction={handleCloseBrowserTab(tab, () => {
+                      setBrowserTabs((prev) => prev.filter((t) => t.id !== tab.id));
+                    })}
+                    shortcut={{ modifiers: ["cmd", "ctrl"], key: "w" }}
+                  />
+                  <Action
+                    title="Refresh Tabs"
+                    onAction={() => {
+                      tabsLoadedRef.current = false;
+                      browserTabManager.invalidateCache();
+                      setIsLoadingTabs(true);
+                      browserTabManager
+                        .queryAllTabs()
+                        .then(setBrowserTabs)
+                        .finally(() => setIsLoadingTabs(false));
+                    }}
+                    shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
+                  />
+                  <Action
+                    title="Clear Tab Filter"
+                    onAction={() => setInputText("")}
+                    shortcut={{ modifiers: ["cmd"], key: "backspace" }}
+                  />
+                </ActionPanel>
+              }
+            />
+          ))}
+        </List.Section>
+      )}
+
+      {!isLoading && sortedWindows.length === 0 && filteredApplications.length === 0 && filteredTabs.length === 0 && (
+        <List.EmptyView
+          title={parseTabFilter(searchText).hasTabFilter ? "No Browser Tabs Found" : "No Windows or Applications Found"}
+          description={
+            parseTabFilter(searchText).hasTabFilter
+              ? "No tabs match your search. Make sure browsers are running and Raycast has automation permissions."
+              : "No windows or applications were found."
+          }
+        />
       )}
 
       {error && (
@@ -912,6 +1111,27 @@ function getDisplayColor(displayIndex: number | undefined): string {
 
   // Use modulo to cycle through colors if more than 6 displays
   return colors[(displayIndex - 1) % colors.length];
+}
+
+function getBrowserColor(browser: BrowserType): string {
+  switch (browser) {
+    case BrowserType.CHROME:
+      return "#4285f4"; // Google blue
+    case BrowserType.SAFARI:
+      return "#007aff"; // Apple blue
+    case BrowserType.VIVALDI:
+      return "#ef3939"; // Vivaldi red
+    case BrowserType.BRAVE:
+      return "#fb542b"; // Brave orange
+    case BrowserType.EDGE:
+      return "#0078d7"; // Microsoft blue
+    case BrowserType.ARC:
+      return "#ff4f8b"; // Arc pink
+    case BrowserType.FIREFOX:
+      return "#ff7139"; // Firefox orange
+    default:
+      return "#6b7280"; // Grey for unknown
+  }
 }
 
 function getAppIcon(window: YabaiWindow, applications: Application[]) {

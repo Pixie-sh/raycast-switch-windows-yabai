@@ -1215,3 +1215,106 @@ export const handleFocusPreviousSpace = () => {
     }
   };
 };
+
+// ==================== Browser Tab Handlers ====================
+
+import { BrowserTab } from "./models";
+import { browserTabManager } from "./utils/browserTabManager";
+import { isAppleScriptPermissionError } from "./utils/appleScriptBridge";
+
+/**
+ * Focus a specific browser tab
+ * @param tab - The browser tab to focus
+ * @param onFocused - Optional callback after successful focus
+ */
+export const handleFocusBrowserTab = (tab: BrowserTab, onFocused?: () => void) => {
+  return async () => {
+    await showToast({
+      style: Toast.Style.Animated,
+      title: `Switching to ${tab.browser}...`,
+    });
+
+    try {
+      await browserTabManager.focusTab(tab);
+
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Tab Focused",
+        message: `${tab.title.slice(0, 40)}${tab.title.length > 40 ? "..." : ""}`,
+      });
+
+      onFocused?.();
+    } catch (error: unknown) {
+      console.error("Focus browser tab failed:", error);
+
+      if (isAppleScriptPermissionError(error)) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Permission Required",
+          message: `Grant Raycast automation access to ${tab.browser} in System Preferences`,
+        });
+      } else {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Failed to Focus Tab",
+          message: error instanceof Error ? error.message : "Unknown error occurred",
+        });
+      }
+    }
+  };
+};
+
+/**
+ * Close a browser tab
+ * @param tab - The browser tab to close
+ * @param onClosed - Optional callback after successful close
+ */
+export const handleCloseBrowserTab = (tab: BrowserTab, onClosed?: () => void) => {
+  return async () => {
+    await showToast({
+      style: Toast.Style.Animated,
+      title: "Closing Tab...",
+    });
+
+    try {
+      // AppleScript to close a specific tab
+      let script: string;
+
+      if (tab.browser === "Safari") {
+        script = `
+          tell application "Safari"
+            close tab ${tab.tabIndex} of window ${tab.windowIndex}
+          end tell
+        `;
+      } else {
+        // Chromium-based browsers
+        script = `
+          tell application "${tab.browser}"
+            close tab ${tab.tabIndex} of window ${tab.windowIndex}
+          end tell
+        `;
+      }
+
+      await execPromise(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { env: ENV });
+
+      // Invalidate cache since tab list changed
+      browserTabManager.invalidateCache(tab.browser);
+
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Tab Closed",
+        message: tab.title.slice(0, 40),
+      });
+
+      onClosed?.();
+    } catch (error: unknown) {
+      console.error("Close browser tab failed:", error);
+
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Failed to Close Tab",
+        message: error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    }
+  };
+};
