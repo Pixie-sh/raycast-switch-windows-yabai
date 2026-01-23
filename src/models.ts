@@ -52,6 +52,52 @@ export interface DisplayInfo {
   isFocused: boolean;
 }
 
+/**
+ * Supported browsers for tab search
+ * Chromium-based browsers share similar AppleScript API
+ */
+export enum BrowserType {
+  CHROME = "Google Chrome",
+  VIVALDI = "Vivaldi",
+  BRAVE = "Brave Browser",
+  EDGE = "Microsoft Edge",
+  ARC = "Arc",
+  SAFARI = "Safari",
+  FIREFOX = "Firefox", // Limited support - window titles only
+}
+
+/**
+ * Represents a browser tab that can be searched and focused
+ */
+export interface BrowserTab {
+  /** Unique identifier: browser-windowIndex-tabIndex */
+  id: string;
+  /** Browser application name */
+  browser: BrowserType;
+  /** Browser window index (1-based) */
+  windowIndex: number;
+  /** Tab index within the window (1-based) */
+  tabIndex: number;
+  /** Full URL of the tab */
+  url: string;
+  /** Tab title */
+  title: string;
+  /** Whether this is the active tab in its window */
+  isActive: boolean;
+  /** Domain extracted from URL for display */
+  domain: string;
+}
+
+/**
+ * Focus history entry from yabai signal log
+ */
+export interface FocusHistoryEntry {
+  /** Unix timestamp when window was focused */
+  timestamp: number;
+  /** Yabai window ID */
+  windowId: number;
+}
+
 export const YABAI = existsSync("/opt/homebrew/bin/yabai")
   ? "/opt/homebrew/bin/yabai"
   : existsSync("/usr/local/bin/yabai")
