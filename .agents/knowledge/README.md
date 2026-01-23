@@ -45,6 +45,7 @@ See `../PERFORMANCE_FIXES.md` for detailed changelog.
 - ❌ DOM APIs (no window/document)
 - ❌ Synchronous file I/O (blocks UI)
 - ❌ Browser localStorage (use `@raycast/api` LocalStorage)
+- ❌ Delegating to Raycast root search (see [raycast_api_limitations.md](./raycast_api_limitations.md))
 
 ### What Works Great
 - ✅ Async operations with proper cleanup
