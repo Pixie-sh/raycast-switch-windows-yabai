@@ -1003,16 +1003,54 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </List.Section>
       )}
 
-      {!isLoading && sortedWindows.length === 0 && filteredApplications.length === 0 && filteredTabs.length === 0 && (
-        <List.EmptyView
-          title={parseTabFilter(searchText).hasTabFilter ? "No Browser Tabs Found" : "No Windows or Applications Found"}
-          description={
-            parseTabFilter(searchText).hasTabFilter
-              ? "No tabs match your search. Make sure browsers are running and Raycast has automation permissions."
-              : "No windows or applications were found."
+      {!isLoading &&
+        sortedWindows.length === 0 &&
+        filteredApplications.length === 0 &&
+        filteredTabs.length === 0 &&
+        (() => {
+          const { hasTabFilter, remainingSearchText } = parseTabFilter(searchText);
+          const effectiveSearch = remainingSearchText.trim();
+
+          // If there's a search query, show "Search on Web" option
+          if (effectiveSearch.length > 0) {
+            const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(effectiveSearch)}`;
+            return (
+              <List.Item
+                key="search-web"
+                icon={Icon.MagnifyingGlass}
+                title={`Search "${effectiveSearch}" on Web`}
+                subtitle="Open in default browser"
+                actions={
+                  <ActionPanel>
+                    <Action.OpenInBrowser title="Search on Google" url={searchUrl} />
+                    <Action.OpenInBrowser
+                      title="Search on Duckduckgo"
+                      url={`https://duckduckgo.com/?q=${encodeURIComponent(effectiveSearch)}`}
+                      shortcut={{ modifiers: ["cmd"], key: "d" }}
+                    />
+                    <Action
+                      title="Clear Search"
+                      onAction={() => setInputText("")}
+                      shortcut={{ modifiers: ["cmd"], key: "backspace" }}
+                    />
+                  </ActionPanel>
+                }
+              />
+            );
           }
-        />
-      )}
+
+          // No search query - show standard empty view
+          return (
+            <List.EmptyView
+              title={hasTabFilter ? "No Browser Tabs Found" : "No Windows or Applications Found"}
+              description={
+                hasTabFilter
+                  ? "No tabs match your search. Make sure browsers are running and Raycast has automation permissions."
+                  : "No windows or applications were found."
+              }
+            />
+          );
+        })()}
 
       {error && (
         <List.EmptyView
