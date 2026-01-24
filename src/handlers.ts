@@ -1,7 +1,7 @@
 import { promisify } from "node:util";
 import { exec, execFile } from "node:child_process";
 import { showToast, Toast } from "@raycast/api";
-import { ENV, YABAI, YabaiSpace, YabaiWindow, Application, YabaiDisplay, DisplayInfo } from "./models";
+import { ENV, YABAI, JQ, YabaiSpace, YabaiWindow, Application, YabaiDisplay, DisplayInfo } from "./models";
 
 const execFilePromise = promisify(execFile);
 const execPromise = promisify(exec);
@@ -302,7 +302,7 @@ export const handleCloseEmptySpaces = (windowId: number, onRemove: (id: number) 
   return async () => {
     await showToast({ style: Toast.Style.Animated, title: "Closing Empty Spaces..." });
     try {
-      const command = `${YABAI} -m query --spaces | jq '.[] | select(.windows | length == 0) | .index' | xargs -I {} ${YABAI} -m space {} --destroy`;
+      const command = `${YABAI} -m query --spaces | ${JQ} '.[] | select(.windows | length == 0) | .index' | xargs -I {} ${YABAI} -m space {} --destroy`;
       const { stderr } = await execPromise(command, { env: ENV });
       if (stderr?.trim()) {
         console.error(stderr);

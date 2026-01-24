@@ -104,6 +104,12 @@ export const YABAI = existsSync("/opt/homebrew/bin/yabai")
     ? "/usr/local/bin/yabai"
     : execSync("which yabai").toString().trim();
 
+export const JQ = existsSync("/opt/homebrew/bin/jq")
+  ? "/opt/homebrew/bin/jq"
+  : existsSync("/usr/local/bin/jq")
+    ? "/usr/local/bin/jq"
+    : execSync("which jq").toString().trim();
+
 export const ENV = {
   USER: os.userInfo().username,
   HOME: os.userInfo().homedir,
