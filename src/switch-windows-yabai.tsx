@@ -23,8 +23,7 @@ import Fuse from "fuse.js";
 import { IncompleteJsonError } from "./utils/json";
 import { yabaiQueryManager } from "./utils/yabaiQueryManager";
 import { browserTabManager } from "./utils/browserTabManager";
-// Focus history manager is available for future integration with yabai signals
-// import { focusHistoryManager, getMergedFocusTimes } from "./utils/focusHistoryManager";
+import { focusHistoryManager, getMergedFocusTimes } from "./utils/focusHistoryManager";
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import * as path from "node:path";
@@ -160,7 +159,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const [sortMethod, setSortMethod] = useState<SortMethod>(SortMethod.RECENTLY_USED);
   const [isSearching, setIsSearching] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [, setLastRefreshTime] = useState<number>(0);
+  const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
 
   // Focus history to track current and previous focused windows
   const [focusHistory, setFocusHistory] = useState<{
@@ -172,6 +171,14 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([]);
   const [isLoadingTabs, setIsLoadingTabs] = useState(false);
   const tabsLoadedRef = useRef(false);
+
+  // Focus tracking state - merges extension usage with yabai focus history
+  const [mergedFocusTimes, setMergedFocusTimes] = useState<Record<number, number>>({});
+  const [isFocusTrackingSetup, setIsFocusTrackingSetup] = useState<boolean | null>(null);
+  const [isMergedFocusTimesReady, setIsMergedFocusTimesReady] = useState(false);
+
+  // Refs to track lazy loading state
+  const appsRefreshedRef = useRef(false);
 
   // Function to remove a window from the local listing after it's closed.
   const removeWindow = useCallback((id: number) => {
@@ -263,12 +270,16 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     [focusHistory.current, updateFocusHistory],
   );
 
-  // Function to refresh all data
+  // Function to refresh all data (windows only on initial load, apps lazy-loaded)
   const refreshAllData = useCallback(
-    async (forceFull = true) => {
+    async (forceFull = true, includeApps = false) => {
       setIsRefreshing(true);
       try {
-        await Promise.all([refreshWindows(forceFull), refreshApplications()]);
+        if (includeApps) {
+          await Promise.all([refreshWindows(forceFull), refreshApplications()]);
+        } else {
+          await refreshWindows(forceFull);
+        }
       } finally {
         setIsRefreshing(false);
       }
@@ -336,6 +347,30 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
     return () => clearTimeout(timeoutId);
   }, [focusHistory]);
+
+  // Check if focus tracking is set up (yabai signal installed)
+  // Also invalidate cache on mount to get fresh focus history from yabai log
+  useEffect(() => {
+    // Invalidate cache to ensure we read fresh data from yabai log
+    focusHistoryManager.invalidateCache();
+    focusHistoryManager.isSetupComplete().then(setIsFocusTrackingSetup);
+  }, []);
+
+  // Merge extension usage times with yabai focus history for accurate sorting
+  // Re-runs when windows change OR when lastRefreshTime changes (indicating fresh window data)
+  useEffect(() => {
+    if (windows.length === 0) return;
+
+    // Invalidate cache before merging to ensure we have latest yabai focus history
+    focusHistoryManager.invalidateCache();
+
+    const windowIds = windows.map((w) => w.id);
+    getMergedFocusTimes(usageTimes, windowIds).then((merged) => {
+      setMergedFocusTimes(merged);
+      setIsMergedFocusTimesReady(true);
+      console.log("Merged focus times ready:", JSON.stringify(merged));
+    });
+  }, [windows, usageTimes, lastRefreshTime]);
 
   // Query windows using useExec - only for initial load
   // Disable useExec for windows; rely on yabaiQueryManager instead
@@ -406,12 +441,12 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   // No background polling - rely on manual refresh to avoid flickering
 
-  // Load applications when the component mounts
+  // Load applications from cache only on mount (lazy refresh when user searches)
   useEffect(() => {
     let isMounted = true;
 
-    const loadApplications = async () => {
-      // Try to load from cache first
+    const loadApplicationsFromCache = async () => {
+      // Only load from cache - don't refresh yet (lazy loading)
       const cachedApps = await LocalStorage.getItem<string>("cachedApplications");
       if (cachedApps && isMounted) {
         try {
@@ -422,19 +457,14 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
           console.error("Error parsing cached applications:", error);
         }
       }
-
-      // Then refresh the applications list
-      if (isMounted) {
-        await refreshApplications();
-      }
     };
 
-    loadApplications();
+    loadApplicationsFromCache();
 
     return () => {
       isMounted = false;
     };
-  }, [refreshApplications]);
+  }, []);
 
   // Create a Fuse instance for fuzzy searching windows
   const fuse = useMemo(() => {
@@ -492,36 +522,22 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     }
   }, [inputText, searchText]);
 
-  // Load browser tabs on mount (like Spotlight behavior)
-  useEffect(() => {
-    let isMounted = true;
+  // Helper function to load browser tabs (lazy loaded)
+  const loadBrowserTabs = useCallback(async () => {
+    if (tabsLoadedRef.current) return;
 
-    const loadTabs = async () => {
-      if (tabsLoadedRef.current) return;
+    setIsLoadingTabs(true);
+    tabsLoadedRef.current = true;
 
-      setIsLoadingTabs(true);
-      tabsLoadedRef.current = true;
-
-      try {
-        const tabs = await browserTabManager.queryAllTabs();
-        if (isMounted) {
-          setBrowserTabs(tabs);
-          console.log(`Loaded ${tabs.length} browser tabs`);
-        }
-      } catch (error) {
-        console.error("Error loading browser tabs:", error);
-      } finally {
-        if (isMounted) {
-          setIsLoadingTabs(false);
-        }
-      }
-    };
-
-    loadTabs();
-
-    return () => {
-      isMounted = false;
-    };
+    try {
+      const tabs = await browserTabManager.queryAllTabs();
+      setBrowserTabs(tabs);
+      console.log(`Loaded ${tabs.length} browser tabs`);
+    } catch (error) {
+      console.error("Error loading browser tabs:", error);
+    } finally {
+      setIsLoadingTabs(false);
+    }
   }, []);
 
   // Create Fuse instance for browser tabs
@@ -590,20 +606,36 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     return [];
   }, [browserTabs, searchText, tabFuse]);
 
-  // Refresh windows when user starts typing (only on first character)
+  // Trigger lazy loading when user starts typing or uses @ prefix
   const prevInputLengthRef = useRef(0);
   useEffect(() => {
     const prevLength = prevInputLengthRef.current;
     const currentLength = inputText.length;
 
-    // Only trigger when going from 0 to 1 character (user just started typing)
-    if (prevLength === 0 && currentLength === 1) {
-      console.log("User started searching, refreshing windows");
+    // Only trigger when going from 0 to 1+ characters (user just started typing)
+    if (prevLength === 0 && currentLength >= 1) {
+      console.log("User started searching, triggering lazy loads");
+
+      // Refresh windows
       refreshWindows(false);
+
+      // Lazy load applications (only once per session)
+      if (!appsRefreshedRef.current) {
+        appsRefreshedRef.current = true;
+        refreshApplications();
+      }
+
+      // Lazy load browser tabs
+      loadBrowserTabs();
+    }
+
+    // Also load tabs if user types @ (tab filter) even from empty state
+    if (inputText.startsWith("@") && !tabsLoadedRef.current) {
+      loadBrowserTabs();
     }
 
     prevInputLengthRef.current = currentLength;
-  }, [inputText, refreshWindows]);
+  }, [inputText, refreshWindows, refreshApplications, loadBrowserTabs]);
 
   // Cache for display-filtered Fuse instances to avoid recreating them
   const displayFilteredFuseCache = useRef<Map<string, Fuse<YabaiWindow>>>(new Map());
@@ -769,11 +801,12 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   }, [applications, searchText, appFuse]);
 
   // Sort windows based on selected sort method.
+  // Uses mergedFocusTimes which combines extension usage with yabai focus history
   const sortedWindows = useMemo(() => {
-    const windows = [...filteredWindows];
+    const windowsCopy = [...filteredWindows];
 
     // Always prioritize the focused window at the top, regardless of sort method
-    return windows.sort((a, b) => {
+    const sorted = windowsCopy.sort((a, b) => {
       // Check if either window is focused
       const aFocused = a["has-focus"] || a.focused;
       const bFocused = b["has-focus"] || b.focused;
@@ -782,26 +815,23 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       if (aFocused && !bFocused) return -1;
       if (!aFocused && bFocused) return 1;
 
-      // If both are focused or neither is focused, use the selected sort method
-      if (sortMethod === SortMethod.USAGE) {
-        // Sort by usage (clicks) - most recent first
-        const timeA = usageTimes[a.id] || 0;
-        const timeB = usageTimes[b.id] || 0;
-        return timeB - timeA;
-      } else if (sortMethod === SortMethod.RECENTLY_USED) {
-        // Sort by recent focus - most recent first
-        // This gives us: [current, previous, other windows...]
-        const timeA = usageTimes[a.id] || 0;
-        const timeB = usageTimes[b.id] || 0;
-        return timeB - timeA;
-      }
-
-      // Default fallback to usage sort
-      const timeA = usageTimes[a.id] || 0;
-      const timeB = usageTimes[b.id] || 0;
+      // Use merged focus times (includes yabai focus history for external focus changes)
+      // Falls back to usageTimes if merged data not yet available
+      const timeA = mergedFocusTimes[a.id] || usageTimes[a.id] || 0;
+      const timeB = mergedFocusTimes[b.id] || usageTimes[b.id] || 0;
       return timeB - timeA;
     });
-  }, [filteredWindows, usageTimes, sortMethod]);
+
+    // Debug: log sorted order
+    if (sorted.length > 0 && isMergedFocusTimesReady) {
+      console.log(
+        "Sorted windows order:",
+        sorted.slice(0, 5).map((w) => `${w.id}:${w.app}(${mergedFocusTimes[w.id] || 0})`),
+      );
+    }
+
+    return sorted;
+  }, [filteredWindows, mergedFocusTimes, usageTimes, isMergedFocusTimesReady]);
 
   // Select the second window in the list (previous window) for Alt+Tab behavior
   // First window = current, Second window = previous (what we want to switch to)
@@ -816,7 +846,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   return (
     <List
-      isLoading={isLoading || isSearching || isRefreshing || isLoadingTabs}
+      isLoading={isLoading || isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady}
       onSearchTextChange={setInputText}
       searchBarPlaceholder="Search windows, apps, and browser tabs... (#3 for display, @ for tabs only)"
       filtering={false} // Disable built-in filtering since we're using Fuse.js
@@ -826,9 +856,16 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         <ActionPanel>
           <Action
             title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
-            onAction={() => refreshAllData(true)}
+            onAction={() => refreshAllData(true, true)}
             shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
           />
+          {isFocusTrackingSetup === false && (
+            <Action.OpenInBrowser
+              title="Setup Focus Tracking"
+              url={`file://${focusHistoryManager.getHistoryDirPath()}`}
+              shortcut={{ modifiers: ["cmd", "shift"], key: "s" }}
+            />
+          )}
           <ActionPanel.Section title="Space Management">
             <SpaceManagementActions />
           </ActionPanel.Section>
@@ -880,10 +917,13 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                   windowTitle={win.title}
                   isFocused={win["has-focus"] || win.focused}
                   onFocused={(id) => {
+                    const now = Date.now();
                     setUsageTimes((prev) => ({
                       ...prev,
-                      [id]: Date.now(),
+                      [id]: now,
                     }));
+                    // Also record focus in yabai history for external tracking
+                    focusHistoryManager.recordFocus(id);
                     closeMainWindow();
                   }}
                   onRemove={removeWindow}
