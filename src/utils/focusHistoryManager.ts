@@ -88,17 +88,28 @@ class FocusHistoryManager {
    * This supplements the yabai signal log
    */
   async recordFocus(windowId: number): Promise<void> {
+    await this.recordFocusAt(windowId, Math.floor(Date.now() / 1000));
+  }
+
+  /**
+   * Record a focus event at a specific unix timestamp (seconds).
+   * Used to stamp the "previously focused" window when switching via the extension
+   * so it retains position #2 on next open.
+   */
+  async recordFocusAt(windowId: number, timestampSeconds: number): Promise<void> {
     try {
       await this.ensureDirectoryExists();
 
-      const timestamp = Math.floor(Date.now() / 1000);
-      const entry = `${timestamp}:${windowId}\n`;
+      const entry = `${timestampSeconds}:${windowId}\n`;
 
       await writeFile(FOCUS_HISTORY_FILE, entry, { flag: "a" });
 
-      // Update cache immediately
+      // Update cache immediately (only if the new timestamp is more recent)
       if (this.cache) {
-        this.cache.set(windowId, timestamp);
+        const existing = this.cache.get(windowId) || 0;
+        if (timestampSeconds > existing) {
+          this.cache.set(windowId, timestampSeconds);
+        }
       }
 
       // Check if rotation is needed

@@ -7,6 +7,7 @@ This directory contains accumulated knowledge and patterns from building and opt
 ### Core Patterns
 - **[performance_patterns.md](./performance_patterns.md)** - Performance optimization patterns, caching strategies, and best practices
 - **[react_raycast_patterns.md](./react_raycast_patterns.md)** - React hooks patterns, Raycast API conventions, and component optimization
+- **[typo-tolerant-search-selection.md](./typo-tolerant-search-selection.md)** - Search ranking, typo-tolerant matching, and search-aware default selection behavior
 
 ### Integration Guides  
 - **[yabai_integration.md](./yabai_integration.md)** - Yabai integration patterns and external process management
@@ -26,6 +27,7 @@ If you're new to the codebase, read in this order:
 3. **performance_patterns.md** - Apply performance best practices
 4. **yabai_integration.md** - Integrate with yabai
 5. **browser_tab_search.md** - Browser tabs & focus tracking
+6. **typo-tolerant-search-selection.md** - Search behavior and selection invariants
 
 ## 🔥 Recent Updates (Nov 2024)
 

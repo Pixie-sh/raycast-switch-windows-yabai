@@ -1,6 +1,7 @@
 import { promisify } from "node:util";
 import { exec, execFile } from "node:child_process";
-import { showToast, Toast } from "@raycast/api";
+import { closeMainWindow, showToast, Toast } from "@raycast/api";
+import { showFailureToast } from "@raycast/utils";
 import { ENV, YABAI, JQ, YabaiSpace, YabaiWindow, Application, YabaiDisplay, DisplayInfo } from "./models";
 
 const execFilePromise = promisify(execFile);
@@ -44,8 +45,6 @@ export const handleFocusWindow = (
   applications: Application[] = [],
 ) => {
   return async () => {
-    await showToast({ style: Toast.Style.Animated, title: "Focusing Window..." });
-
     // Check if this is a utility app that requires special handling
     const isUtility = isUtilityApp(windowApp);
 
@@ -63,16 +62,21 @@ export const handleFocusWindow = (
         onFocused(windowId);
       } catch (launchError) {
         console.error(`Failed to launch utility app ${windowApp}:`, launchError);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Failed to Activate Utility App",
-          message: `Could not launch ${windowApp}: ${launchError instanceof Error ? launchError.message : "Unknown error"}`,
-        });
+        await showFailureToast(launchError, { title: "Failed to Activate Utility App" });
       }
       return;
     }
 
     try {
+      // Close the Raycast window BEFORE issuing the yabai focus command.
+      // This prevents the "second click required" race condition where Raycast's
+      // closeMainWindow() — called after the focus — snaps macOS focus back to
+      // the original space/display, undoing the yabai space switch.
+      // We also add a short delay after close to let macOS fully settle window
+      // focus before yabai takes over, preventing a second-click requirement.
+      await closeMainWindow();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
       const { stderr } = await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--focus"], {
         env: ENV,
       });
@@ -82,9 +86,6 @@ export const handleFocusWindow = (
         // Check if the error indicates window doesn't exist
         if (isWindowNotFoundError(stderr.trim()) || isApplicationNotRunningError(stderr.trim())) {
           console.log(`Window ${windowId} not found, attempting to launch application ${windowApp}`);
-
-          // Update toast to indicate switching to app launch
-          await showToast({ style: Toast.Style.Animated, title: `Launching ${windowApp}...` });
 
           try {
             const strategy = await launchOrFocusApplication(windowApp, applications);
@@ -97,25 +98,34 @@ export const handleFocusWindow = (
             onFocused(windowId);
           } catch (launchError) {
             console.error(`Failed to launch application ${windowApp}:`, launchError);
-            await showToast({
-              style: Toast.Style.Failure,
-              title: "Failed to Launch Application",
-              message: `Could not focus window or launch ${windowApp}: ${launchError instanceof Error ? launchError.message : "Unknown error"}`,
-            });
+            await showFailureToast(launchError, { title: "Failed to Launch Application" });
           }
         } else {
           // Other yabai errors that don't indicate missing window
-          await showToast({
-            style: Toast.Style.Failure,
-            title: "Yabai Error - Focus Window",
-            message: stderr.trim(),
-          });
+          await showFailureToast(new Error(stderr.trim()), { title: "Yabai Error - Focus Window" });
         }
       } else {
-        await showToast({
-          style: Toast.Style.Success,
-          title: `${windowApp} focused`,
-        });
+        // First focus succeeded. Issue a second focus request after a short delay to
+        // work around intermittent cases where macOS/yabai doesn't fully commit the
+        // focus on the first call (e.g. cross-space or cross-display switches).
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        try {
+          const { stderr: stderr2 } = await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--focus"], {
+            env: ENV,
+          });
+          if (stderr2?.trim()) {
+            // Log but don't surface — the first call already succeeded and the window
+            // may have been legitimately closed/moved between the two calls.
+            console.log(`Yabai window focus retry stderr (non-fatal): ${stderr2.trim()}`);
+          }
+        } catch (retryError) {
+          // Non-fatal: first call succeeded, retry is best-effort.
+          console.log(
+            `Yabai window focus retry exception (non-fatal): ${
+              retryError instanceof Error ? retryError.message : retryError
+            }`,
+          );
+        }
         onFocused(windowId);
       }
     } catch (error: unknown) {
@@ -125,9 +135,6 @@ export const handleFocusWindow = (
       // Check if the exception also indicates window doesn't exist
       if (isWindowNotFoundError(errorMessage) || isApplicationNotRunningError(errorMessage)) {
         console.log(`Exception indicates window ${windowId} not found, attempting to launch application ${windowApp}`);
-
-        // Update toast to indicate switching to app launch
-        await showToast({ style: Toast.Style.Animated, title: `Launching ${windowApp}...` });
 
         try {
           const strategy = await launchOrFocusApplication(windowApp, applications);
@@ -140,19 +147,11 @@ export const handleFocusWindow = (
           onFocused(windowId);
         } catch (launchError) {
           console.error(`Failed to launch application ${windowApp}:`, launchError);
-          await showToast({
-            style: Toast.Style.Failure,
-            title: "Failed to Launch Application",
-            message: `Could not focus window or launch ${windowApp}: ${launchError instanceof Error ? launchError.message : "Unknown error"}`,
-          });
+          await showFailureToast(launchError, { title: "Failed to Launch Application" });
         }
       } else {
         // Other errors that don't indicate missing window
-        await showToast({
-          style: Toast.Style.Failure,
-          title: `Failed Window ${windowApp} (${windowId}) focus`,
-          message: errorMessage,
-        });
+        await showFailureToast(error, { title: `Failed Window ${windowApp} (${windowId}) focus` });
       }
     }
   };
@@ -167,11 +166,7 @@ export const handleCloseWindow = (windowId: number, windowApp: string, onRemove:
         env: ENV,
       });
       if (stderr?.trim()) {
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Yabai Error - Close Window",
-          message: stderr.trim(),
-        });
+        await showFailureToast(new Error(stderr.trim()), { title: "Yabai Error - Close Window" });
       } else {
         await showToast({
           style: Toast.Style.Success,
@@ -181,11 +176,7 @@ export const handleCloseWindow = (windowId: number, windowApp: string, onRemove:
         onRemove(windowId);
       }
     } catch (error: unknown) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Failed to Close Window",
-        message: error instanceof Error ? error.message : "Unknown error while closing window",
-      });
+      await showFailureToast(error, { title: "Failed to Close Window" });
     }
   };
 };
@@ -238,11 +229,7 @@ export const handleAggregateToSpace = (windowId: number, windowApp: string) => {
       }
 
       if (!targetSpace) {
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Aggregation Failed",
-          message: "Could not find or create an empty space.",
-        });
+        await showFailureToast(new Error("Could not find or create an empty space."), { title: "Aggregation Failed" });
         return;
       }
 
@@ -268,7 +255,9 @@ export const handleAggregateToSpace = (windowId: number, windowApp: string) => {
           }
         } catch (innerError: unknown) {
           console.error(
-            `Exception while moving window ${win.id}: ${innerError instanceof Error ? innerError.message : "Unknown error"}`,
+            `Exception while moving window ${win.id}: ${
+              innerError instanceof Error ? innerError.message : "Unknown error"
+            }`,
           );
         }
       }
@@ -289,11 +278,7 @@ export const handleAggregateToSpace = (windowId: number, windowApp: string) => {
       });
     } catch (error: unknown) {
       console.error("Aggregation failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Aggregation Failed",
-        message: error instanceof Error ? error.message : "An unknown error occurred during aggregation.",
-      });
+      await showFailureToast(error, { title: "Aggregation Failed" });
     }
   };
 };
@@ -306,11 +291,7 @@ export const handleCloseEmptySpaces = (windowId: number, onRemove: (id: number) 
       const { stderr } = await execPromise(command, { env: ENV });
       if (stderr?.trim()) {
         console.error(stderr);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Yabai Error - Close Empty Spaces",
-          message: stderr.trim(),
-        });
+        await showFailureToast(new Error(stderr.trim()), { title: "Yabai Error - Close Empty Spaces" });
       } else {
         await showToast({
           style: Toast.Style.Success,
@@ -320,11 +301,7 @@ export const handleCloseEmptySpaces = (windowId: number, onRemove: (id: number) 
         onRemove(windowId);
       }
     } catch (error: unknown) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Failed to Close Empty Spaces",
-        message: error instanceof Error ? error.message : "Unknown error while closing window",
-      });
+      await showFailureToast(error, { title: "Failed to Close Empty Spaces" });
     }
   };
 };
@@ -339,11 +316,7 @@ export const handleMoveWindowToDisplay = (windowId: number, windowApp: string, d
 
       if (stderr?.trim()) {
         console.error(`Error moving window ${windowId}: ${stderr.trim()}`);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Yabai Error - Move Window",
-          message: stderr.trim(),
-        });
+        await showFailureToast(new Error(stderr.trim()), { title: "Yabai Error - Move Window" });
       } else {
         console.log(`Moved window ${windowId} to display ${displayIdx}.`);
 
@@ -358,11 +331,7 @@ export const handleMoveWindowToDisplay = (windowId: number, windowApp: string, d
       }
     } catch (error: unknown) {
       console.error("Move window failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Move Window Failed",
-        message: error instanceof Error ? error.message : "An unknown error occurred while moving the window.",
-      });
+      await showFailureToast(error, { title: "Move Window Failed" });
     }
   };
 };
@@ -430,11 +399,7 @@ export const handleDisperseWindowsBySpace = (screenIdx: string) => {
       });
     } catch (error: unknown) {
       console.error("Dispersal failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Dispersal Failed",
-        message: error instanceof Error ? error.message : "An unknown error occurred during dispersal.",
-      });
+      await showFailureToast(error, { title: "Dispersal Failed" });
     }
   };
 };
@@ -549,10 +514,8 @@ export const handleOpenWindowInNewSpace = (windowId: number, windowApp: string) 
 
         if (moveResult.stderr?.trim()) {
           console.error(`Error moving window ${windowId}: ${moveResult.stderr.trim()}`);
-          await showToast({
-            style: Toast.Style.Failure,
+          await showFailureToast(new Error(moveResult.stderr.trim()), {
             title: "Yabai Error - Move Window to New Space",
-            message: moveResult.stderr.trim(),
           });
           return;
         }
@@ -576,15 +539,13 @@ export const handleOpenWindowInNewSpace = (windowId: number, windowApp: string) 
       await showToast({
         style: Toast.Style.Success,
         title: windowExists ? "Window Opened in New Space" : "Application Launched in New Space",
-        message: `${windowApp} has been ${windowExists ? "moved to" : "launched in"} a new space on display ${targetDisplay}.`,
+        message: `${windowApp} has been ${
+          windowExists ? "moved to" : "launched in"
+        } a new space on display ${targetDisplay}.`,
       });
     } catch (error: unknown) {
       console.error("Open in new space failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Open in New Space Failed",
-        message: error instanceof Error ? error.message : "An unknown error occurred while opening in a new space.",
-      });
+      await showFailureToast(error, { title: "Open in New Space Failed" });
     }
   };
 };
@@ -650,11 +611,7 @@ export const handleMoveToDisplaySpace = (windowId: number, windowApp: string) =>
 
       if (moveResult.stderr?.trim()) {
         console.error(`Error moving window ${windowId}: ${moveResult.stderr.trim()}`);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Yabai Error - Move Window to Space",
-          message: moveResult.stderr.trim(),
-        });
+        await showFailureToast(new Error(moveResult.stderr.trim()), { title: "Yabai Error - Move Window to Space" });
         return;
       }
 
@@ -669,18 +626,13 @@ export const handleMoveToDisplaySpace = (windowId: number, windowApp: string) =>
       await showToast({
         style: Toast.Style.Success,
         title: "Window Moved to Display Space",
-        message: `${windowApp} has been moved to ${emptySpacesOnDisplay.length > 0 ? "an empty" : "a new"} space on the current display and focused.`,
+        message: `${windowApp} has been moved to ${
+          emptySpacesOnDisplay.length > 0 ? "an empty" : "a new"
+        } space on the current display and focused.`,
       });
     } catch (error: unknown) {
       console.error("Move to display space failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Move to Display Space Failed",
-        message:
-          error instanceof Error
-            ? error.message
-            : "An unknown error occurred while moving the window to display space.",
-      });
+      await showFailureToast(error, { title: "Move to Display Space Failed" });
     }
   };
 };
@@ -880,11 +832,7 @@ export const handleInteractiveMoveToDisplay = (windowId: number, windowApp: stri
 
       if (stderr?.trim()) {
         console.error(`Error moving window ${windowId} to display ${displayIndex}: ${stderr.trim()}`);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Move Failed",
-          message: stderr.trim(),
-        });
+        await showFailureToast(new Error(stderr.trim()), { title: "Move Failed" });
         return;
       }
 
@@ -905,11 +853,7 @@ export const handleInteractiveMoveToDisplay = (windowId: number, windowApp: stri
       });
     } catch (error: unknown) {
       console.error("Interactive move to display failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Move Failed",
-        message: error instanceof Error ? error.message : "Unknown error occurred",
-      });
+      await showFailureToast(error, { title: "Move Failed" });
     }
   };
 };
@@ -1005,11 +949,7 @@ export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) 
 
       if (stderr?.trim()) {
         console.error(`Error moving window ${windowId} to focused space ${focusedSpaceIndex}: ${stderr.trim()}`);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Move Failed",
-          message: stderr.trim(),
-        });
+        await showFailureToast(new Error(stderr.trim()), { title: "Move Failed" });
         return;
       }
 
@@ -1032,11 +972,7 @@ export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) 
       });
     } catch (error: unknown) {
       console.error("Move to focused space failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Move Failed",
-        message: error instanceof Error ? error.message : "Unknown error occurred",
-      });
+      await showFailureToast(error, { title: "Move Failed" });
     }
   };
 };
@@ -1065,11 +1001,7 @@ export const handleCreateSpace = () => {
 
       if (stderr?.trim()) {
         console.error(`Error creating space: ${stderr.trim()}`);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Failed to Create Space",
-          message: stderr.trim(),
-        });
+        await showFailureToast(new Error(stderr.trim()), { title: "Failed to Create Space" });
         return;
       }
 
@@ -1098,11 +1030,7 @@ export const handleCreateSpace = () => {
       }
     } catch (error: unknown) {
       console.error("Create space failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Failed to Create Space",
-        message: error instanceof Error ? error.message : "Unknown error occurred",
-      });
+      await showFailureToast(error, { title: "Failed to Create Space" });
     }
   };
 };
@@ -1126,11 +1054,12 @@ export const handleDestroySpace = () => {
 
       // Check if the space has windows
       if (currentSpace.windows && currentSpace.windows.length > 0) {
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Cannot Destroy Space",
-          message: `Space ${currentSpace.index} has ${currentSpace.windows.length} window(s). Close or move them first.`,
-        });
+        await showFailureToast(
+          new Error(
+            `Space ${currentSpace.index} has ${currentSpace.windows.length} window(s). Close or move them first.`,
+          ),
+          { title: "Cannot Destroy Space" },
+        );
         return;
       }
 
@@ -1141,11 +1070,7 @@ export const handleDestroySpace = () => {
 
       if (stderr?.trim()) {
         console.error(`Error destroying space ${spaceIndex}: ${stderr.trim()}`);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Failed to Destroy Space",
-          message: stderr.trim(),
-        });
+        await showFailureToast(new Error(stderr.trim()), { title: "Failed to Destroy Space" });
         return;
       }
 
@@ -1157,11 +1082,7 @@ export const handleDestroySpace = () => {
       });
     } catch (error: unknown) {
       console.error("Destroy space failed:", error);
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Failed to Destroy Space",
-        message: error instanceof Error ? error.message : "Unknown error occurred",
-      });
+      await showFailureToast(error, { title: "Failed to Destroy Space" });
     }
   };
 };
@@ -1248,17 +1169,11 @@ export const handleFocusBrowserTab = (tab: BrowserTab, onFocused?: () => void) =
       console.error("Focus browser tab failed:", error);
 
       if (isAppleScriptPermissionError(error)) {
-        await showToast({
-          style: Toast.Style.Failure,
+        await showFailureToast(new Error(`Grant Raycast automation access to ${tab.browser} in System Preferences`), {
           title: "Permission Required",
-          message: `Grant Raycast automation access to ${tab.browser} in System Preferences`,
         });
       } else {
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Failed to Focus Tab",
-          message: error instanceof Error ? error.message : "Unknown error occurred",
-        });
+        await showFailureToast(error, { title: "Failed to Focus Tab" });
       }
     }
   };
@@ -1309,12 +1224,7 @@ export const handleCloseBrowserTab = (tab: BrowserTab, onClosed?: () => void) =>
       onClosed?.();
     } catch (error: unknown) {
       console.error("Close browser tab failed:", error);
-
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Failed to Close Tab",
-        message: error instanceof Error ? error.message : "Unknown error occurred",
-      });
+      await showFailureToast(error, { title: "Failed to Close Tab" });
     }
   };
 };

@@ -1,7 +1,18 @@
 // TypeScript
-import { Action, ActionPanel, closeMainWindow, Icon, LaunchType, List, LocalStorage } from "@raycast/api";
+import {
+  Action,
+  ActionPanel,
+  closeMainWindow,
+  getApplications,
+  Icon,
+  Keyboard,
+  LaunchType,
+  List,
+  LocalStorage,
+} from "@raycast/api";
+import { getFavicon } from "@raycast/utils";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
-import { Application, BrowserTab, BrowserType, ENV, SortMethod, YabaiWindow } from "./models";
+import { Application, BrowserTab, BrowserType, SortMethod, YabaiWindow } from "./models";
 import {
   handleAggregateToSpace,
   handleCloseEmptySpaces,
@@ -10,6 +21,8 @@ import {
   handleOpenWindowInNewSpace,
   handleFocusBrowserTab,
   handleCloseBrowserTab,
+  launchApplicationByPath,
+  launchApplicationByName,
 } from "./handlers";
 import {
   DisperseOnDisplayActions,
@@ -24,11 +37,9 @@ import { IncompleteJsonError } from "./utils/json";
 import { yabaiQueryManager } from "./utils/yabaiQueryManager";
 import { browserTabManager } from "./utils/browserTabManager";
 import { focusHistoryManager, getMergedFocusTimes } from "./utils/focusHistoryManager";
-import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
-import * as path from "node:path";
-import { exec } from "node:child_process";
 import { parseDisplayFilter } from "./utils/displayFilter";
+import { getDefaultSelectedItemId, searchItems } from "./utils/searchUtils";
+import type { SearchField } from "./utils/searchUtils";
 
 /**
  * Parse tab search prefix from search text
@@ -66,56 +77,33 @@ function getBrowserIcon(browser: BrowserType): string {
   }
 }
 
-/**
- * Get favicon URL for a tab using Google's favicon service
- * Falls back to browser icon if URL is invalid
- */
-function getFaviconUrl(tab: BrowserTab): string | undefined {
-  if (!tab.url || tab.url === "about:blank" || tab.url.startsWith("chrome://") || tab.url.startsWith("about:")) {
-    return undefined; // Will use fallback icon
-  }
-  try {
-    const url = new URL(tab.url);
-    // Use Google's favicon service - reliable and fast
-    return `https://www.google.com/s2/favicons?domain=${url.hostname}&sz=64`;
-  } catch {
-    return undefined;
-  }
+const WINDOW_SEARCH_FIELDS: SearchField<YabaiWindow>[] = [
+  { getValue: (window) => window.app, priority: 0 },
+  { getValue: (window) => window.title, priority: 1 },
+];
+
+const APPLICATION_SEARCH_FIELDS: SearchField<Application>[] = [
+  { getValue: (application) => application.name, priority: 0 },
+];
+
+const TAB_SEARCH_FIELDS: SearchField<BrowserTab>[] = [
+  { getValue: (tab) => tab.title, priority: 0 },
+  { getValue: (tab) => tab.domain, priority: 1 },
+  { getValue: (tab) => tab.url, priority: 2 },
+];
+
+const SEARCH_WEB_ITEM_ID = "search-web";
+
+function getWindowItemId(windowId: number): string {
+  return `window-${windowId}`;
 }
 
-// Function to list applications from standard directories (async for better performance)
-async function listApplications(): Promise<Application[]> {
-  const applications: Application[] = [];
-  const appDirectories = [
-    "/Applications",
-    "/Applications/Utilities",
-    path.join(ENV.HOME, "Applications"),
-    "/System/Applications",
-    "/System/Applications/Utilities",
-    "/System/Library/CoreServices",
-  ];
+function getApplicationItemId(application: Application): string {
+  return `app-${application.path || application.name}`;
+}
 
-  // Process directories in parallel for faster loading
-  await Promise.all(
-    appDirectories.map(async (dir) => {
-      if (existsSync(dir)) {
-        try {
-          const files = await readdir(dir);
-          for (const file of files) {
-            if (file.endsWith(".app")) {
-              const appPath = path.join(dir, file);
-              const appName = file.replace(".app", "");
-              applications.push({ name: appName, path: appPath });
-            }
-          }
-        } catch (error) {
-          console.error(`Error reading directory ${dir}:`, error);
-        }
-      }
-    }),
-  );
-
-  return applications;
+function getTabItemId(tabId: string): string {
+  return `tab-${tabId}`;
 }
 
 // Custom hook for debounced search
@@ -154,6 +142,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});
   const [inputText, setInputText] = useState("");
   const searchText = useDebounce(inputText, 30); // Reduced debounce delay for better responsiveness
+  const tabFilter = useMemo(() => parseTabFilter(searchText), [searchText]);
+  const displayFilter = useMemo(() => parseDisplayFilter(searchText), [searchText]);
+  const hasActiveSearch = searchText.trim().length > 0;
   const [windows, setWindows] = useState<YabaiWindow[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
   const [sortMethod, setSortMethod] = useState<SortMethod>(SortMethod.RECENTLY_USED);
@@ -161,11 +152,15 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
 
-  // Focus history to track current and previous focused windows
+  // Focus history to track current and previous focused windows.
+  // Stores both window ID and app name: ID is used within the same yabai session
+  // (stable IDs), app name is the cross-session fallback (IDs reset on reboot/restart).
   const [focusHistory, setFocusHistory] = useState<{
     current: number | null;
+    currentApp: string | null;
     previous: number | null;
-  }>({ current: null, previous: null });
+    previousApp: string | null;
+  }>({ current: null, currentApp: null, previous: null, previousApp: null });
 
   // Browser tabs state
   const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([]);
@@ -176,9 +171,43 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const [mergedFocusTimes, setMergedFocusTimes] = useState<Record<number, number>>({});
   const [isFocusTrackingSetup, setIsFocusTrackingSetup] = useState<boolean | null>(null);
   const [isMergedFocusTimesReady, setIsMergedFocusTimesReady] = useState(false);
+  // True once focusHistory has been loaded from LocalStorage on mount.
+  // Used to gate the spinner: we must not show the sorted list until we know
+  // previousApp, otherwise sortedWindows step 2 runs with null and puts the
+  // wrong window at position 1.
+  const [isFocusHistoryLoaded, setIsFocusHistoryLoaded] = useState(false);
+
+  // Auto-select countdown state — mimics Cmd+Tab release behavior.
+  // Uses exponential backoff: quick switch (1 Tab) is fast, more cycling = more thinking time.
+  // delay = min(BASE * BACKOFF^(cycles-1), MAX)
+  const AUTO_SELECT_BASE = 1050;
+  const AUTO_SELECT_BACKOFF = 1.4;
+  const AUTO_SELECT_MAX = 3000;
+  const AUTO_SELECT_GIVE_UP = 6; // After this many Tab presses, cancel countdown entirely
+  const autoSelectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const autoSelectCancelledRef = useRef(false);
+  const [autoSelectCountdown, setAutoSelectCountdown] = useState<number | null>(null);
+
+  // Tab-cycling state — controlled via Tab / Shift+Tab actions within the open extension.
+  // Starts at index 0 (first item highlighted). Cycling starts the auto-select countdown.
+  const [cycleIndex, setCycleIndex] = useState(0);
+  // Total Tab presses (never wraps). Used for exponential backoff so it doesn't
+  // reset when cycleIndex wraps back to 0.
+  const totalTabPressesRef = useRef(0);
 
   // Refs to track lazy loading state
-  const appsRefreshedRef = useRef(false);
+
+  // Ref that always holds the latest focusHistory.current value.
+  // Used inside refreshWindows so we can read it without putting focusHistory.current
+  // in the useCallback dep array (which would recreate refreshWindows/refreshAllData
+  // and re-trigger the "Initial refresh" effect on every focus change).
+  const focusHistoryCurrentRef = useRef<number | null>(null);
+
+  // Keep the ref in sync whenever focusHistory.current changes.
+  useEffect(() => {
+    focusHistoryCurrentRef.current = focusHistory.current;
+  }, [focusHistory.current]);
 
   // Function to remove a window from the local listing after it's closed.
   const removeWindow = useCallback((id: number) => {
@@ -188,29 +217,24 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const updateFocusHistory = useCallback((windowsData: YabaiWindow[]) => {
     const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
     const currentFocusedId = currentlyFocused?.id || null;
+    const currentFocusedApp = currentlyFocused?.app || null;
 
     setFocusHistory((prevHistory) => {
       if (currentFocusedId !== prevHistory.current) {
+        // Only promote current→previous when we have a known current window.
+        // If prevHistory.current is null (e.g. first update before LocalStorage loaded),
+        // keep the persisted previous/previousApp so the cross-session fallback survives.
+        const newPrevious = prevHistory.current !== null ? prevHistory.current : prevHistory.previous;
+        const newPreviousApp = prevHistory.current !== null ? prevHistory.currentApp : prevHistory.previousApp;
         return {
           current: currentFocusedId,
-          previous: prevHistory.current,
+          currentApp: currentFocusedApp,
+          previous: newPrevious,
+          previousApp: newPreviousApp,
         };
       }
       return prevHistory;
     });
-  }, []);
-
-  const refreshApplications = useCallback(async () => {
-    try {
-      const freshApps = await listApplications();
-      setApplications(freshApps);
-
-      // Update the cache
-      await LocalStorage.setItem("cachedApplications", JSON.stringify(freshApps));
-      console.log("Updated applications cache");
-    } catch (error) {
-      console.error("Error refreshing applications:", error);
-    }
   }, []);
 
   // Use a ref to prevent simultaneous refreshes without causing dependency issues
@@ -232,7 +256,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
           // Check if focus has changed
           const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
           const newFocusedId = currentlyFocused?.id || null;
-          const previousFocusedId = focusHistory.current;
+          const previousFocusedId = focusHistoryCurrentRef.current;
 
           // Always update the windows data to keep the list current
           setWindows(windowsData);
@@ -267,24 +291,20 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         isRefreshingRef.current = false;
       }
     },
-    [focusHistory.current, updateFocusHistory],
+    [updateFocusHistory],
   );
 
-  // Function to refresh all data (windows only on initial load, apps lazy-loaded)
+  // Function to refresh all data (windows only)
   const refreshAllData = useCallback(
-    async (forceFull = true, includeApps = false) => {
+    async (forceFull = true) => {
       setIsRefreshing(true);
       try {
-        if (includeApps) {
-          await Promise.all([refreshWindows(forceFull), refreshApplications()]);
-        } else {
-          await refreshWindows(forceFull);
-        }
+        await refreshWindows(forceFull);
       } finally {
         setIsRefreshing(false);
       }
     },
-    [refreshWindows, refreshApplications],
+    [refreshWindows],
   );
 
   // Load previous usage times, sort method, and focus history from local storage when the component mounts.
@@ -318,6 +338,11 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
           console.error("error setting stored focus history;", e);
         }
       }
+
+      // Mark focus history as loaded regardless of whether storage had a value.
+      // The spinner stays on until this is true, ensuring sortedWindows step 2
+      // runs with the correct previousApp before the list is shown.
+      setIsFocusHistoryLoaded(true);
     })();
   }, []);
 
@@ -374,13 +399,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   // Query windows using useExec - only for initial load
   // Disable useExec for windows; rely on yabaiQueryManager instead
-  const isLoading = false as const;
-  const data = undefined as unknown as YabaiWindow[] | undefined;
-  const error = undefined as unknown as Error | undefined;
 
-  // Load cached windows and handle data changes
+  // Load cached windows on mount
   useEffect(() => {
-    // Load cached windows on mount
     const loadCachedWindows = async () => {
       const cachedData = await LocalStorage.getItem<string>("cachedWindows");
       if (cachedData) {
@@ -388,7 +409,12 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
           const { windows: cachedWindows, timestamp } = JSON.parse(cachedData);
           if (Array.isArray(cachedWindows) && cachedWindows.length > 0) {
             setWindows(cachedWindows);
-            updateFocusHistory(cachedWindows);
+            // Do NOT call updateFocusHistory here: focusHistory hasn't been loaded from
+            // LocalStorage yet (the storage load effect is async and may not have settled),
+            // so updateFocusHistory would see prevHistory.current === null and wipe the
+            // persisted previous/previousApp. The real refreshWindows call (triggered by
+            // the mount effect) will call updateFocusHistory with fresh yabai data after
+            // storage has had time to load.
             setLastRefreshTime(timestamp);
             console.log("Loaded windows from cache, timestamp:", new Date(timestamp).toLocaleString());
           }
@@ -399,27 +425,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     };
 
     loadCachedWindows();
-
-    // Handle data changes from useExec
-    if (data !== undefined && Array.isArray(data)) {
-      setWindows(data);
-      updateFocusHistory(data);
-
-      // Update cache with timestamp
-      const cacheData = {
-        windows: data,
-        timestamp: Date.now(),
-      };
-      LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
-      setLastRefreshTime(Date.now());
-      console.log("Updated windows cache from useExec");
-    }
-    // Remove the else clause that was clearing windows
-    // We should only clear windows if there's an actual error, not when data is undefined
-    if (error) {
-      console.error("Error fetching windows from useExec:", error);
-    }
-  }, [data, isLoading, error]);
+  }, []);
 
   // Initial refresh when extension opens
   useEffect(() => {
@@ -441,26 +447,16 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   // No background polling - rely on manual refresh to avoid flickering
 
-  // Load applications from cache only on mount (lazy refresh when user searches)
+  // Load applications on mount using native getApplications()
   useEffect(() => {
     let isMounted = true;
-
-    const loadApplicationsFromCache = async () => {
-      // Only load from cache - don't refresh yet (lazy loading)
-      const cachedApps = await LocalStorage.getItem<string>("cachedApplications");
-      if (cachedApps && isMounted) {
-        try {
-          const parsedApps = JSON.parse(cachedApps);
-          setApplications(parsedApps);
-          console.log("Loaded applications from cache");
-        } catch (error) {
-          console.error("Error parsing cached applications:", error);
+    getApplications()
+      .then((apps) => {
+        if (isMounted) {
+          setApplications(apps.map((a) => ({ name: a.name, path: a.path })));
         }
-      }
-    };
-
-    loadApplicationsFromCache();
-
+      })
+      .catch((error) => console.error("Error loading applications:", error));
     return () => {
       isMounted = false;
     };
@@ -559,52 +555,33 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   // Filter browser tabs based on search text (Spotlight-like behavior)
   // @ prefix = show ONLY tabs, otherwise show tabs along with windows/apps
   const filteredTabs = useMemo(() => {
-    const { hasTabFilter, remainingSearchText } = parseTabFilter(searchText);
-
     if (!Array.isArray(browserTabs) || browserTabs.length === 0) return [];
 
     // Determine the effective search text
-    const effectiveSearch = hasTabFilter ? remainingSearchText : searchText;
+    const effectiveSearch = tabFilter.hasTabFilter ? tabFilter.remainingSearchText : searchText;
 
     // If @ with no search term, return all tabs
     // If no search at all (empty), don't show tabs (only show when searching)
-    if (hasTabFilter && !effectiveSearch.trim()) return browserTabs;
+    if (tabFilter.hasTabFilter && !effectiveSearch.trim()) return browserTabs;
     if (!effectiveSearch.trim()) return [];
 
     // Skip tabs if display filter is active (tabs don't have displays)
-    const { hasDisplayFilter } = parseDisplayFilter(searchText);
-    if (hasDisplayFilter && !hasTabFilter) return [];
+    if (displayFilter.hasDisplayFilter && !tabFilter.hasTabFilter) return [];
 
-    // Search in title, domain, and URL
-    const searchLower = effectiveSearch.toLowerCase();
-
-    // First try exact substring matches
-    const exactMatches = browserTabs.filter(
-      (tab) =>
-        tab.title.toLowerCase().includes(searchLower) ||
-        tab.domain.toLowerCase().includes(searchLower) ||
-        tab.url.toLowerCase().includes(searchLower),
-    );
-
-    if (exactMatches.length > 0) {
-      return exactMatches.sort((a, b) => {
-        // Prioritize title matches over domain/URL matches
-        const aInTitle = a.title.toLowerCase().includes(searchLower);
-        const bInTitle = b.title.toLowerCase().includes(searchLower);
-        if (aInTitle && !bInTitle) return -1;
-        if (!aInTitle && bInTitle) return 1;
-        return 0;
-      });
-    }
-
-    // Fall back to fuzzy search
-    if (tabFuse) {
-      const results = tabFuse.search(effectiveSearch);
-      return results.map((r) => r.item);
-    }
-
-    return [];
-  }, [browserTabs, searchText, tabFuse]);
+    return searchItems({
+      items: browserTabs,
+      query: effectiveSearch,
+      fields: TAB_SEARCH_FIELDS,
+      fuse: tabFuse,
+    });
+  }, [
+    browserTabs,
+    displayFilter.hasDisplayFilter,
+    searchText,
+    tabFilter.hasTabFilter,
+    tabFilter.remainingSearchText,
+    tabFuse,
+  ]);
 
   // Trigger lazy loading when user starts typing or uses @ prefix
   const prevInputLengthRef = useRef(0);
@@ -619,12 +596,6 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       // Refresh windows
       refreshWindows(false);
 
-      // Lazy load applications (only once per session)
-      if (!appsRefreshedRef.current) {
-        appsRefreshedRef.current = true;
-        refreshApplications();
-      }
-
       // Lazy load browser tabs
       loadBrowserTabs();
     }
@@ -635,7 +606,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     }
 
     prevInputLengthRef.current = currentLength;
-  }, [inputText, refreshWindows, refreshApplications, loadBrowserTabs]);
+  }, [inputText, refreshWindows, loadBrowserTabs]);
 
   // Cache for display-filtered Fuse instances to avoid recreating them
   const displayFilteredFuseCache = useRef<Map<string, Fuse<YabaiWindow>>>(new Map());
@@ -648,34 +619,26 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     // Special case: if search text is just "#" without a number, keep all windows
     if (searchText.trim() === "#") return windows;
 
-    // Parse display filter from search text (e.g., "#3" or "#2 chrome")
-    // Display filter syntax: #N where N is the display number (1-99)
-    // Examples: "#3" (display 3 only), "#2 chrome" (Chrome on display 2)
-    // Note: Filter must be at the start of search text to be recognized
-    const { displayNumber, remainingSearchText, hasDisplayFilter } = parseDisplayFilter(searchText);
-
     // Apply display filter first if present (Precedence: Display filter → Text search)
     // This approach ensures optimal performance by reducing the search space early
     let windowsToSearch = windows;
-    if (hasDisplayFilter && displayNumber !== null) {
-      windowsToSearch = windows.filter((win) => win.display === displayNumber);
+    if (displayFilter.hasDisplayFilter && displayFilter.displayNumber !== null) {
+      windowsToSearch = windows.filter((win) => win.display === displayFilter.displayNumber);
 
       // Early return if no windows found on specified display
       if (windowsToSearch.length === 0) {
-        setIsSearching(false);
         return [];
       }
 
       // If only display filter (no additional search text), return all windows on that display
       // This handles cases like "#3" where user wants all windows on display 3
-      if (!remainingSearchText.trim()) {
-        setIsSearching(false);
+      if (!displayFilter.remainingSearchText.trim()) {
         return windowsToSearch;
       }
     }
 
     // If no additional search text after display filter, return filtered windows
-    const effectiveSearchText = remainingSearchText || searchText;
+    const effectiveSearchText = displayFilter.hasDisplayFilter ? displayFilter.remainingSearchText : searchText;
     if (!effectiveSearchText.trim()) {
       return windowsToSearch;
     }
@@ -683,9 +646,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     // Get or create a Fuse instance for the filtered window set
     // Use caching to avoid recreating Fuse instances for the same display
     let searchFuse = fuse;
-    if (hasDisplayFilter && displayNumber !== null && windowsToSearch !== windows) {
+    if (displayFilter.hasDisplayFilter && displayFilter.displayNumber !== null && windowsToSearch !== windows) {
       if (windowsToSearch.length > 0) {
-        const cacheKey = `display-${displayNumber}-${windowsToSearch.length}`;
+        const cacheKey = `display-${displayFilter.displayNumber}-${windowsToSearch.length}`;
         let cachedFuse = displayFilteredFuseCache.current.get(cacheKey);
 
         if (!cachedFuse) {
@@ -725,49 +688,20 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
     if (!searchFuse) return [];
 
-    // Use improved search logic with app name prioritization
-    try {
-      const searchLower = effectiveSearchText.toLowerCase();
-
-      // First, get all windows that match in either app name or title
-      const appMatches = windowsToSearch.filter((win) => (win.app || "").toLowerCase().includes(searchLower));
-      const titleMatches = windowsToSearch.filter(
-        (win) =>
-          (win.title || "").toLowerCase().includes(searchLower) && !(win.app || "").toLowerCase().includes(searchLower), // Exclude if already in app matches
-      );
-
-      // If we have matches, prioritize app name matches over title matches
-      if (appMatches.length > 0 || titleMatches.length > 0) {
-        setIsSearching(false);
-        // Sort app matches by app name length (shorter = more precise)
-        const sortedAppMatches = appMatches.sort((a, b) => {
-          // Exact match comes first
-          const aExact = (a.app || "").toLowerCase() === searchLower;
-          const bExact = (b.app || "").toLowerCase() === searchLower;
-          if (aExact && !bExact) return -1;
-          if (!aExact && bExact) return 1;
-
-          // Then by app name length
-          return (a.app || "").length - (b.app || "").length;
-        });
-
-        // Sort title matches by title length
-        const sortedTitleMatches = titleMatches.sort((a, b) => (a.title || "").length - (b.title || "").length);
-
-        // Return app matches first, then title matches
-        return [...sortedAppMatches, ...sortedTitleMatches];
-      }
-
-      // Otherwise use fuzzy search
-      const results = searchFuse.search(effectiveSearchText);
-      setIsSearching(false); // Search is complete
-      return results.map((result) => result.item);
-    } catch (error) {
-      console.error("Error during search:", error);
-      setIsSearching(false);
-      return windowsToSearch; // Fallback to filtered windows on error
-    }
-  }, [windows, searchText, fuse]);
+    return searchItems({
+      items: windowsToSearch,
+      query: effectiveSearchText,
+      fields: WINDOW_SEARCH_FIELDS,
+      fuse: searchFuse,
+    });
+  }, [
+    displayFilter.displayNumber,
+    displayFilter.hasDisplayFilter,
+    displayFilter.remainingSearchText,
+    fuse,
+    searchText,
+    windows,
+  ]);
 
   // Filter applications based on the search text using fuzzy search
   const filteredApplications = useMemo(() => {
@@ -778,40 +712,30 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     if (searchText.trim() === "#") return applications;
 
     if (!appFuse) return [];
-
-    // Use fuzzy search with optimizations
-    try {
-      // First try exact match on app name
-      const exactMatches = applications.filter((app) =>
-        (app.name || "").toLowerCase().includes(searchText.toLowerCase()),
-      );
-
-      // If we have exact matches, prioritize them
-      if (exactMatches.length > 0) {
-        return exactMatches;
-      }
-
-      // Otherwise use fuzzy search
-      const results = appFuse.search(searchText);
-      return results.map((result) => result.item);
-    } catch (error) {
-      console.error("Error during application search:", error);
-      return applications; // Fallback to all applications on error
-    }
+    return searchItems({
+      items: applications,
+      query: searchText,
+      fields: APPLICATION_SEARCH_FIELDS,
+      fuse: appFuse,
+    });
   }, [applications, searchText, appFuse]);
 
   // Sort windows based on selected sort method.
   // Uses mergedFocusTimes which combines extension usage with yabai focus history
   const sortedWindows = useMemo(() => {
     const windowsCopy = [...filteredWindows];
+    const hasWindowSearchQuery = displayFilter.hasDisplayFilter
+      ? displayFilter.remainingSearchText.trim().length > 0
+      : searchText.trim().length > 0;
 
-    // Always prioritize the focused window at the top, regardless of sort method
-    const sorted = windowsCopy.sort((a, b) => {
-      // Check if either window is focused
+    if (hasWindowSearchQuery) {
+      return windowsCopy;
+    }
+
+    // Step 1: sort by focus time, with the currently-focused window always first.
+    windowsCopy.sort((a, b) => {
       const aFocused = a["has-focus"] || a.focused;
       const bFocused = b["has-focus"] || b.focused;
-
-      // If one is focused and the other isn't, focused window goes first
       if (aFocused && !bFocused) return -1;
       if (!aFocused && bFocused) return 1;
 
@@ -822,22 +746,182 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       return timeB - timeA;
     });
 
+    // Step 2: explicitly place the previous window at position 1 (index 1).
+    // First try to find it by ID (reliable within the same yabai session).
+    // If that fails (IDs reset on reboot/restart), fall back to app name match.
+    // This ensures the "Alt+Tab previous" window is always at #2.
+    const prevId = focusHistory.previous;
+    const prevApp = focusHistory.previousApp;
+    if (windowsCopy.length > 1 && (prevId !== null || prevApp !== null)) {
+      let prevIdx = prevId !== null ? windowsCopy.findIndex((w) => w.id === prevId) : -1;
+      // Cross-session fallback: match by app name when ID is stale
+      if (prevIdx === -1 && prevApp !== null) {
+        prevIdx = windowsCopy.findIndex((w) => w.app === prevApp && !(w["has-focus"] || w.focused));
+      }
+      // Only move it if it exists, isn't already at position 1, and isn't the focused one
+      if (prevIdx > 1) {
+        const [prevWin] = windowsCopy.splice(prevIdx, 1);
+        windowsCopy.splice(1, 0, prevWin);
+      }
+    }
+
     // Debug: log sorted order
-    if (sorted.length > 0 && isMergedFocusTimesReady) {
+    if (windowsCopy.length > 0 && isMergedFocusTimesReady) {
       console.log(
         "Sorted windows order:",
-        sorted.slice(0, 5).map((w) => `${w.id}:${w.app}(${mergedFocusTimes[w.id] || 0})`),
+        windowsCopy.slice(0, 5).map((w) => `${w.id}:${w.app}(${mergedFocusTimes[w.id] || 0})`),
       );
     }
 
-    return sorted;
-  }, [filteredWindows, mergedFocusTimes, usageTimes, isMergedFocusTimesReady]);
+    return windowsCopy;
+  }, [
+    filteredWindows,
+    mergedFocusTimes,
+    usageTimes,
+    isMergedFocusTimesReady,
+    focusHistory.previous,
+    focusHistory.previousApp,
+    displayFilter.hasDisplayFilter,
+    displayFilter.remainingSearchText,
+    searchText,
+  ]);
 
-  // Select the second window in the list (previous window) for Alt+Tab behavior
-  // First window = current, Second window = previous (what we want to switch to)
-  const selectedWindow = useMemo(() => {
-    return sortedWindows.length > 1 ? sortedWindows[1] : sortedWindows[0];
-  }, [sortedWindows]);
+  // Tab-cycling: select the window at the current cycle index.
+  // First open = index 0, each subsequent Tab press increments.
+  const altTabSelectedWindow = useMemo(() => {
+    if (sortedWindows.length === 0) return undefined;
+    const effectiveIndex = cycleIndex % sortedWindows.length;
+    return sortedWindows[effectiveIndex];
+  }, [sortedWindows, cycleIndex]);
+
+  // Cycle callbacks for Tab / Shift+Tab actions
+  const cycleNext = useCallback(() => {
+    if (sortedWindows.length === 0) return;
+    totalTabPressesRef.current += 1;
+    setCycleIndex((prev) => (prev + 1) % sortedWindows.length);
+  }, [sortedWindows.length]);
+
+  const cyclePrev = useCallback(() => {
+    if (sortedWindows.length === 0) return;
+    totalTabPressesRef.current += 1;
+    setCycleIndex((prev) => (prev - 1 + sortedWindows.length) % sortedWindows.length);
+  }, [sortedWindows.length]);
+
+  // Cancel auto-select permanently when the user types anything
+  useEffect(() => {
+    if (inputText.length > 0 && !autoSelectCancelledRef.current) {
+      autoSelectCancelledRef.current = true;
+      // Also reset cycle index since the user is now searching
+      setCycleIndex(0);
+    }
+  }, [inputText]);
+
+  // Ref that always holds the latest altTabSelectedWindow so the timer
+  // callback can read it without stale closures.
+  const altTabSelectedWindowRef = useRef(altTabSelectedWindow);
+  useEffect(() => {
+    altTabSelectedWindowRef.current = altTabSelectedWindow;
+  }, [altTabSelectedWindow]);
+
+  // Auto-select countdown — only activates after the first Tab press (cycleIndex >= 1).
+  // Uses exponential backoff: more cycling = longer delay (user is unsure).
+  // cycleIndex 1 → 750ms, 2 → 1050ms, 3 → 1470ms, 4 → 2058ms, 5+ → capped at 3000ms.
+  // React cleanup handles clearing timers on each re-run.
+  useEffect(() => {
+    if (autoSelectCancelledRef.current) return;
+    if (!isMergedFocusTimesReady || !isFocusHistoryLoaded) return;
+    if (!altTabSelectedWindow) return;
+    if (inputText.length > 0) return;
+    if (totalTabPressesRef.current < 1) return;
+
+    const presses = totalTabPressesRef.current;
+    // Too many cycles = user is undecided, stop pressuring them
+    if (presses >= AUTO_SELECT_GIVE_UP) {
+      console.log(`${presses} presses: auto-select disabled (too indecisive)`);
+      autoSelectCancelledRef.current = true;
+      return;
+    }
+    const delay = Math.min(
+      Math.round(AUTO_SELECT_BASE * Math.pow(AUTO_SELECT_BACKOFF, presses - 1)),
+      AUTO_SELECT_MAX,
+    );
+
+    console.log(`Cycle ${cycleIndex} (${presses} total presses): auto-select delay = ${delay}ms`);
+
+    // Visual countdown (updates every 250ms)
+    const startTime = Date.now();
+    setAutoSelectCountdown(delay);
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, delay - (Date.now() - startTime));
+      setAutoSelectCountdown(remaining);
+      if (remaining <= 0) clearInterval(interval);
+    }, 250);
+
+    // Actual auto-select timer
+    const timer = setTimeout(async () => {
+      const win = altTabSelectedWindowRef.current;
+      if (!win || autoSelectCancelledRef.current) {
+        setAutoSelectCountdown(null);
+        return;
+      }
+
+      console.log(`Auto-select countdown fired, switching to ${win.app} (${win.id})`);
+
+      const now = Date.now();
+      const prevId = focusHistory.current;
+      const prevApp = focusHistory.currentApp;
+      setFocusHistory({ current: win.id, currentApp: win.app, previous: prevId, previousApp: prevApp });
+      setUsageTimes((prev) => ({ ...prev, [win.id]: now }));
+      focusHistoryManager.recordFocus(win.id);
+
+      const focusAction = handleFocusWindow(win.id, win.app, () => {
+        closeMainWindow();
+      }, applications);
+      await focusAction();
+
+      setAutoSelectCountdown(null);
+    }, delay);
+
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+      setAutoSelectCountdown(null);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cycleIndex, isMergedFocusTimesReady, isFocusHistoryLoaded]);
+
+  const searchWebQuery = tabFilter.remainingSearchText.trim();
+  const shouldShowSearchWebResult =
+    !(isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded) &&
+    sortedWindows.length === 0 &&
+    filteredApplications.length === 0 &&
+    filteredTabs.length === 0 &&
+    searchWebQuery.length > 0;
+
+  const visibleItemIds = useMemo(() => {
+    const itemIds: string[] = [];
+
+    if (!tabFilter.hasTabFilter) {
+      itemIds.push(...sortedWindows.map((window) => getWindowItemId(window.id)));
+      itemIds.push(...filteredApplications.map((application) => getApplicationItemId(application)));
+    }
+
+    itemIds.push(...filteredTabs.map((tab) => getTabItemId(tab.id)));
+
+    if (shouldShowSearchWebResult) {
+      itemIds.push(SEARCH_WEB_ITEM_ID);
+    }
+
+    return itemIds;
+  }, [filteredApplications, filteredTabs, shouldShowSearchWebResult, sortedWindows, tabFilter.hasTabFilter]);
+
+  const selectedItemId = useMemo(() => {
+    return getDefaultSelectedItemId({
+      hasSearchText: hasActiveSearch,
+      emptySearchItemId: altTabSelectedWindow ? getWindowItemId(altTabSelectedWindow.id) : undefined,
+      visibleItemIds,
+    });
+  }, [altTabSelectedWindow, hasActiveSearch, visibleItemIds]);
 
   // No need for focus/blur detection anymore since we only refresh on mount
 
@@ -846,18 +930,18 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   return (
     <List
-      isLoading={isLoading || isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady}
+      isLoading={isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded}
       onSearchTextChange={setInputText}
       searchBarPlaceholder="Search windows, apps, and browser tabs... (#3 for display, @ for tabs only)"
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
-      selectedItemId={selectedWindow ? `window-${selectedWindow.id}` : undefined} // Select second window (previous) for Alt+Tab
+      selectedItemId={selectedItemId}
       actions={
         <ActionPanel>
           <Action
             title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
-            onAction={() => refreshAllData(true, true)}
-            shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
+            onAction={() => refreshAllData(true)}
+            shortcut={Keyboard.Shortcut.Common.Refresh}
           />
           {isFocusTrackingSetup === false && (
             <Action.OpenInBrowser
@@ -887,18 +971,25 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </ActionPanel>
       }
     >
-      {sortedWindows.length > 0 && !parseTabFilter(searchText).hasTabFilter && (
+      {sortedWindows.length > 0 && !tabFilter.hasTabFilter && (
         <List.Section
           title={(() => {
-            const { displayNumber, hasDisplayFilter } = parseDisplayFilter(searchText);
-            return hasDisplayFilter && displayNumber !== null ? `Windows (Display #${displayNumber})` : "Windows";
+            return displayFilter.hasDisplayFilter && displayFilter.displayNumber !== null
+              ? `Windows (Display #${displayFilter.displayNumber})`
+              : "Windows";
           })()}
-          subtitle={sortedWindows.length.toString()}
+          subtitle={(() => {
+            const count = sortedWindows.length.toString();
+            if (autoSelectCountdown !== null && autoSelectCountdown > 0) {
+              return `${count} · auto-switching in ${(autoSelectCountdown / 1000).toFixed(1)}s`;
+            }
+            return count;
+          })()}
         >
           {sortedWindows.map((win) => (
             <List.Item
               key={win.id}
-              id={`window-${win.id}`} // Add id for default selection
+              id={getWindowItemId(win.id)}
               icon={{
                 ...getAppIcon(win, applications),
                 tintColor: win["has-focus"] || win.focused ? "#10b981" : undefined,
@@ -918,12 +1009,26 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                   isFocused={win["has-focus"] || win.focused}
                   onFocused={(id) => {
                     const now = Date.now();
-                    setUsageTimes((prev) => ({
-                      ...prev,
-                      [id]: now,
-                    }));
+                    const prevId = focusHistory.current;
+                    const prevApp = focusHistory.currentApp;
+
+                    // Update focus history: the window we're leaving becomes "previous",
+                    // the window we're switching to becomes "current".
+                    // Both ID and app name are stored: ID works within the same yabai session;
+                    // app name is the cross-session fallback when IDs reset (reboot/restart).
+                    setFocusHistory({ current: id, currentApp: win.app, previous: prevId, previousApp: prevApp });
+
+                    setUsageTimes((prev) => {
+                      const updated: Record<string, number> = { ...prev, [id]: now };
+                      return updated;
+                    });
                     // Also record focus in yabai history for external tracking
                     focusHistoryManager.recordFocus(id);
+                    // closeMainWindow() is called here for the already-focused window
+                    // shortcut path (isFocused === true, no yabai command is run).
+                    // For the normal focus path, handleFocusWindow calls closeMainWindow()
+                    // *before* the yabai command to prevent the race condition where
+                    // Raycast snaps focus back to the original space/display.
                     closeMainWindow();
                   }}
                   onRemove={removeWindow}
@@ -933,6 +1038,8 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                   applications={applications}
                   setInputText={setInputText}
                   windows={windows}
+                  onCycleNext={cycleNext}
+                  onCyclePrev={cyclePrev}
                 />
               }
             />
@@ -940,19 +1047,34 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </List.Section>
       )}
 
-      {filteredApplications.length > 0 && !parseTabFilter(searchText).hasTabFilter && (
+      {filteredApplications.length > 0 && !tabFilter.hasTabFilter && (
         <List.Section title="Applications" subtitle={filteredApplications.length.toString()}>
           {filteredApplications.map((app) => (
             <List.Item
               key={app.path}
+              id={getApplicationItemId(app)}
               icon={{ fileIcon: app.path }}
               title={app.name}
               actions={
                 <ActionPanel>
                   <Action
                     title="Open Application"
-                    onAction={() => {
-                      exec(`open "${app.path}"`);
+                    onAction={async () => {
+                      try {
+                        await closeMainWindow();
+                        if (app.path) {
+                          await launchApplicationByPath(app.path);
+                        } else {
+                          await launchApplicationByName(app.name);
+                        }
+                      } catch {
+                        // fallback: try by name if path launch failed
+                        try {
+                          await launchApplicationByName(app.name);
+                        } catch (e) {
+                          console.error("Failed to open application:", e);
+                        }
+                      }
                     }}
                   />
                   <Action
@@ -992,11 +1114,12 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
           {filteredTabs.map((tab) => (
             <List.Item
               key={tab.id}
-              id={`tab-${tab.id}`}
-              icon={{
-                source: getFaviconUrl(tab) || getBrowserIcon(tab.browser),
-                fallback: Icon.Globe,
-              }}
+              id={getTabItemId(tab.id)}
+              icon={
+                tab.url && !tab.url.startsWith("about:") && !tab.url.startsWith("chrome://")
+                  ? getFavicon(tab.url, { fallback: getBrowserIcon(tab.browser) })
+                  : { source: getBrowserIcon(tab.browser), fallback: Icon.Globe }
+              }
               title={tab.title || "Untitled"}
               subtitle={tab.domain}
               accessories={[
@@ -1043,62 +1166,48 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </List.Section>
       )}
 
-      {!isLoading &&
-        sortedWindows.length === 0 &&
-        filteredApplications.length === 0 &&
-        filteredTabs.length === 0 &&
-        (() => {
-          const { hasTabFilter, remainingSearchText } = parseTabFilter(searchText);
-          const effectiveSearch = remainingSearchText.trim();
-
-          // If there's a search query, show "Search on Web" option
-          if (effectiveSearch.length > 0) {
-            const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(effectiveSearch)}`;
-            return (
-              <List.Item
-                key="search-web"
-                icon={Icon.MagnifyingGlass}
-                title={`Search "${effectiveSearch}" on Web`}
-                subtitle="Open in default browser"
-                actions={
-                  <ActionPanel>
-                    <Action.OpenInBrowser title="Search on Google" url={searchUrl} />
-                    <Action.OpenInBrowser
-                      title="Search on Duckduckgo"
-                      url={`https://duckduckgo.com/?q=${encodeURIComponent(effectiveSearch)}`}
-                      shortcut={{ modifiers: ["cmd"], key: "d" }}
-                    />
-                    <Action
-                      title="Clear Search"
-                      onAction={() => setInputText("")}
-                      shortcut={{ modifiers: ["cmd"], key: "backspace" }}
-                    />
-                  </ActionPanel>
-                }
+      {shouldShowSearchWebResult && (
+        <List.Item
+          id={SEARCH_WEB_ITEM_ID}
+          key={SEARCH_WEB_ITEM_ID}
+          icon={Icon.MagnifyingGlass}
+          title={`Search "${searchWebQuery}" on Web`}
+          subtitle="Open in default browser"
+          actions={
+            <ActionPanel>
+              <Action.OpenInBrowser
+                title="Search on Google"
+                url={`https://www.google.com/search?q=${encodeURIComponent(searchWebQuery)}`}
               />
-            );
+              <Action.OpenInBrowser
+                title="Search on Duckduckgo"
+                url={`https://duckduckgo.com/?q=${encodeURIComponent(searchWebQuery)}`}
+                shortcut={{ modifiers: ["cmd"], key: "d" }}
+              />
+              <Action
+                title="Clear Search"
+                onAction={() => setInputText("")}
+                shortcut={{ modifiers: ["cmd"], key: "backspace" }}
+              />
+            </ActionPanel>
           }
-
-          // No search query - show standard empty view
-          return (
-            <List.EmptyView
-              title={hasTabFilter ? "No Browser Tabs Found" : "No Windows or Applications Found"}
-              description={
-                hasTabFilter
-                  ? "No tabs match your search. Make sure browsers are running and Raycast has automation permissions."
-                  : "No windows or applications were found."
-              }
-            />
-          );
-        })()}
-
-      {error && (
-        <List.EmptyView
-          title="Error Fetching Windows"
-          description={error.message}
-          icon={{ source: "@raycast/api/exclamation-mark-triangle-fill" }}
         />
       )}
+
+      {!(isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded) &&
+        !shouldShowSearchWebResult &&
+        sortedWindows.length === 0 &&
+        filteredApplications.length === 0 &&
+        filteredTabs.length === 0 && (
+          <List.EmptyView
+            title={tabFilter.hasTabFilter ? "No Browser Tabs Found" : "No Windows or Applications Found"}
+            description={
+              tabFilter.hasTabFilter
+                ? "No tabs match your search. Make sure browsers are running and Raycast has automation permissions."
+                : "No windows or applications were found."
+            }
+          />
+        )}
     </List>
   );
 }
@@ -1116,6 +1225,8 @@ function WindowActions({
   applications = [],
   setInputText,
   windows,
+  onCycleNext,
+  onCyclePrev,
 }: {
   windowId: number;
   windowApp: string;
@@ -1129,16 +1240,13 @@ function WindowActions({
   applications?: Application[];
   setInputText: (text: string) => void;
   windows: YabaiWindow[];
+  onCycleNext: () => void;
+  onCyclePrev: () => void;
 }) {
   const availableDisplays = useMemo(() => getAvailableDisplayNumbers(windows), [windows]);
   return (
     <ActionPanel>
-      <Action
-        title="Switch to Window"
-        onAction={
-          isFocused ? () => onFocused(windowId) : handleFocusWindow(windowId, windowApp, onFocused, applications)
-        }
-      />
+      <Action title="Switch to Window" onAction={handleFocusWindow(windowId, windowApp, onFocused, applications)} />
       <Action
         title="Open in New Space"
         onAction={handleOpenWindowInNewSpace(windowId, windowApp)}
@@ -1188,6 +1296,18 @@ function WindowActions({
             shortcut={{ modifiers: ["opt", "ctrl"], key: String(displayNum) as never }}
           />
         ))}
+      </ActionPanel.Section>
+      <ActionPanel.Section title="Cycle">
+        <Action
+          title="Next Window"
+          onAction={onCycleNext}
+          shortcut={{ modifiers: [], key: "tab" }}
+        />
+        <Action
+          title="Previous Window"
+          onAction={onCyclePrev}
+          shortcut={{ modifiers: ["shift"], key: "tab" }}
+        />
       </ActionPanel.Section>
       <ActionPanel.Section title="Sort by">
         <Action title="Sort by Previous" onAction={() => setSortMethod(SortMethod.RECENTLY_USED)} />
@@ -1240,59 +1360,10 @@ function getBrowserColor(browser: BrowserType): string {
 function getAppIcon(window: YabaiWindow, applications: Application[]) {
   const appName = window.app;
 
-  // 1. Try to find the application in the pre-loaded applications list
   const foundApp = applications.find((app) => app.name === appName);
   if (foundApp) {
     return { fileIcon: foundApp.path };
   }
 
-  // 2. Handle special cases for system apps with known paths or built-in icons
-  if (appName === "Finder") {
-    return { fileIcon: "/System/Library/CoreServices/Finder.app" };
-  }
-  if (appName === "SystemUIServer" || appName === "Control Center") {
-    return { source: "gear" }; // Raycast built-in icon
-  }
-
-  // 3. Handle common apps with specific Raycast built-in icons
-  if (appName.toLowerCase().includes("chrome")) {
-    return { source: "globe" };
-  }
-  if (appName.toLowerCase().includes("terminal") || appName.toLowerCase().includes("iterm")) {
-    return { source: "terminal" };
-  }
-  if (appName.toLowerCase().includes("safari") || appName.toLowerCase().includes("firefox")) {
-    return { source: "globe" };
-  }
-  if (appName.toLowerCase().includes("mail") || appName.toLowerCase().includes("outlook")) {
-    return { source: "envelope" };
-  }
-  if (
-    appName.toLowerCase().includes("slack") ||
-    appName.toLowerCase().includes("whatsapp") ||
-    appName.toLowerCase().includes("messages") ||
-    appName.toLowerCase().includes("telegram")
-  ) {
-    return { source: "message" };
-  }
-  if (
-    appName.toLowerCase().includes("notes") ||
-    appName.toLowerCase().includes("text") ||
-    appName.toLowerCase().includes("word") ||
-    appName.toLowerCase().includes("pages")
-  ) {
-    return { source: "document" };
-  }
-  if (
-    appName.toLowerCase().includes("code") ||
-    appName.toLowerCase().includes("studio") ||
-    appName.toLowerCase().includes("webstorm") ||
-    appName.toLowerCase().includes("intellij") ||
-    appName.toLowerCase().includes("pycharm")
-  ) {
-    return { source: "terminal" }; // Using terminal for IDEs, could be 'code' if available
-  }
-
-  // 4. Fallback to a generic application icon
-  return { source: "app-generic" };
+  return { source: Icon.Window };
 }
