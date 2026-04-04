@@ -184,8 +184,6 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const AUTO_SELECT_BACKOFF = 1.4;
   const AUTO_SELECT_MAX = 3000;
   const AUTO_SELECT_GIVE_UP = 6; // After this many Tab presses, cancel countdown entirely
-  const autoSelectTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const autoSelectCancelledRef = useRef(false);
   const [autoSelectCountdown, setAutoSelectCountdown] = useState<number | null>(null);
 
@@ -841,10 +839,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       autoSelectCancelledRef.current = true;
       return;
     }
-    const delay = Math.min(
-      Math.round(AUTO_SELECT_BASE * Math.pow(AUTO_SELECT_BACKOFF, presses - 1)),
-      AUTO_SELECT_MAX,
-    );
+    const delay = Math.min(Math.round(AUTO_SELECT_BASE * Math.pow(AUTO_SELECT_BACKOFF, presses - 1)), AUTO_SELECT_MAX);
 
     console.log(`Cycle ${cycleIndex} (${presses} total presses): auto-select delay = ${delay}ms`);
 
@@ -874,9 +869,14 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       setUsageTimes((prev) => ({ ...prev, [win.id]: now }));
       focusHistoryManager.recordFocus(win.id);
 
-      const focusAction = handleFocusWindow(win.id, win.app, () => {
-        closeMainWindow();
-      }, applications);
+      const focusAction = handleFocusWindow(
+        win.id,
+        win.app,
+        () => {
+          closeMainWindow();
+        },
+        applications,
+      );
       await focusAction();
 
       setAutoSelectCountdown(null);
@@ -887,8 +887,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       clearInterval(interval);
       setAutoSelectCountdown(null);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cycleIndex, isMergedFocusTimesReady, isFocusHistoryLoaded]);
+  }, [cycleIndex, isMergedFocusTimesReady, isFocusHistoryLoaded]); // eslint-disable-line
 
   const searchWebQuery = tabFilter.remainingSearchText.trim();
   const shouldShowSearchWebResult =
@@ -1221,6 +1220,7 @@ function WindowActions({
   setSortMethod,
   onRefresh,
   isRefreshing,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   isFocused,
   applications = [],
   setInputText,
@@ -1298,16 +1298,8 @@ function WindowActions({
         ))}
       </ActionPanel.Section>
       <ActionPanel.Section title="Cycle">
-        <Action
-          title="Next Window"
-          onAction={onCycleNext}
-          shortcut={{ modifiers: [], key: "tab" }}
-        />
-        <Action
-          title="Previous Window"
-          onAction={onCyclePrev}
-          shortcut={{ modifiers: ["shift"], key: "tab" }}
-        />
+        <Action title="Next Window" onAction={onCycleNext} shortcut={{ modifiers: [], key: "tab" }} />
+        <Action title="Previous Window" onAction={onCyclePrev} shortcut={{ modifiers: ["shift"], key: "tab" }} />
       </ActionPanel.Section>
       <ActionPanel.Section title="Sort by">
         <Action title="Sort by Previous" onAction={() => setSortMethod(SortMethod.RECENTLY_USED)} />
