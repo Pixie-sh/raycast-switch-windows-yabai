@@ -16,3 +16,20 @@ compiled_raycast_swift
 
 # Development documentation
 /.warp
+/.opencode
+/.env.example
+/specs
+/AGENTS.md
+/opencode.json
+/tui.json
+/.utcp_config.json
+/CLAUDE.md
+/.claude
+/.mcp.json
+/.codex
+/GEMINI.md
+/.agents
+/.gemini
+# CocoIndex Code (ccc)
+/.cocoindex_code/
+.knowledge
