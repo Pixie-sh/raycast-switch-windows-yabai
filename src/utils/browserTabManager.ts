@@ -9,12 +9,34 @@
  * - In-flight dedup prevents duplicate queries
  */
 
+import { existsSync } from "node:fs";
 import { LocalStorage } from "@raycast/api";
 import { BrowserTab, BrowserType } from "../models";
 import { runAppleScript, isBrowserNotRunning, isAppleScriptPermissionError } from "./appleScriptBridge";
 
 const MAX_TABS_PER_BROWSER = 200;
-const CACHE_TTL_MS = 30000; // 30s — generous TTL since queries are slow
+const CACHE_TTL_MS = 30000;
+
+/**
+ * Map browser types to their macOS application paths.
+ * Only browsers found on disk will be queried.
+ */
+const BROWSER_APP_PATHS: Record<BrowserType, string[]> = {
+  [BrowserType.CHROME]: ["/Applications/Google Chrome.app"],
+  [BrowserType.VIVALDI]: ["/Applications/Vivaldi.app"],
+  [BrowserType.BRAVE]: ["/Applications/Brave Browser.app"],
+  [BrowserType.EDGE]: ["/Applications/Microsoft Edge.app"],
+  [BrowserType.ARC]: ["/Applications/Arc.app"],
+  [BrowserType.OPERA]: ["/Applications/Opera.app"],
+  [BrowserType.OPERA_GX]: ["/Applications/Opera GX.app"],
+  [BrowserType.SAFARI]: ["/Applications/Safari.app", "/System/Applications/Safari.app"],
+  [BrowserType.FIREFOX]: ["/Applications/Firefox.app"],
+};
+
+/** Cached set of installed browsers (checked once at startup). */
+const INSTALLED_BROWSERS: BrowserType[] = (Object.entries(BROWSER_APP_PATHS) as [BrowserType, string[]][])
+  .filter(([, paths]) => paths.some((p) => existsSync(p)))
+  .map(([browser]) => browser);
 
 interface AllTabsCache {
   data: BrowserTab[] | null;
@@ -107,7 +129,7 @@ class BrowserTabManager {
    * No dependency on yabai or System Events for browser detection.
    */
   private async fetchAllTabs(): Promise<BrowserTab[]> {
-    const allBrowsers = (Object.values(BrowserType) as BrowserType[]).filter((b) => !this.permissionErrors.has(b));
+    const allBrowsers = INSTALLED_BROWSERS.filter((b) => !this.permissionErrors.has(b));
 
     const results = await Promise.allSettled(allBrowsers.map((browser) => this.fetchBrowserTabs(browser)));
 

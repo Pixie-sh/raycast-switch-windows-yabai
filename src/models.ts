@@ -63,6 +63,8 @@ export enum BrowserType {
   BRAVE = "Brave Browser",
   EDGE = "Microsoft Edge",
   ARC = "Arc",
+  OPERA = "Opera",
+  OPERA_GX = "Opera GX",
   SAFARI = "Safari",
   FIREFOX = "Firefox", // Limited support - window titles only
 }
