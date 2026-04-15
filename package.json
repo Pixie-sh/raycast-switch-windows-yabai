@@ -9,12 +9,33 @@
     "Productivity"
   ],
   "license": "MIT",
+  "keywords": [
+    "yabai",
+    "window-manager",
+    "tiling"
+  ],
   "commands": [
     {
       "name": "switch-windows-yabai",
       "title": "Switch Windows (Yabai)",
       "description": "Switch Windows extension similar to Native Raycast one but using Yabai. More actions to come",
       "mode": "view"
+    },
+    {
+      "name": "load-scripting-addition",
+      "title": "Load Yabai Scripting Addition",
+      "description": "Run 'sudo yabai --load-sa' to load the yabai scripting addition (requires admin password)",
+      "mode": "no-view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "yabaiPath",
+      "title": "Yabai Executable Path",
+      "description": "Path to the yabai executable. Leave empty for auto-detection (checks /opt/homebrew/bin/yabai, /usr/local/bin/yabai, then PATH).",
+      "type": "textfield",
+      "required": false,
+      "placeholder": "Auto-detected"
     }
   ],
   "dependencies": {

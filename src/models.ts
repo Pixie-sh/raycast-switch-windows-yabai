@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as os from "node:os";
+import { getPreferenceValues } from "@raycast/api";
 
 export interface Application {
   name: string;
@@ -98,11 +99,21 @@ export interface FocusHistoryEntry {
   windowId: number;
 }
 
-export const YABAI = existsSync("/opt/homebrew/bin/yabai")
-  ? "/opt/homebrew/bin/yabai"
-  : existsSync("/usr/local/bin/yabai")
-    ? "/usr/local/bin/yabai"
-    : execSync("which yabai").toString().trim();
+interface Preferences {
+  yabaiPath?: string;
+}
+
+function resolveYabaiPath(): string {
+  const prefs = getPreferenceValues<Preferences>();
+  if (prefs.yabaiPath && existsSync(prefs.yabaiPath)) {
+    return prefs.yabaiPath;
+  }
+  if (existsSync("/opt/homebrew/bin/yabai")) return "/opt/homebrew/bin/yabai";
+  if (existsSync("/usr/local/bin/yabai")) return "/usr/local/bin/yabai";
+  return execSync("which yabai").toString().trim();
+}
+
+export const YABAI = resolveYabaiPath();
 
 export const JQ = existsSync("/opt/homebrew/bin/jq")
   ? "/opt/homebrew/bin/jq"

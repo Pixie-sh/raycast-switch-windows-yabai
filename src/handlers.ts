@@ -1213,7 +1213,7 @@ export const handleCloseBrowserTab = (tab: BrowserTab, onClosed?: () => void) =>
       await execPromise(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { env: ENV });
 
       // Invalidate cache since tab list changed
-      browserTabManager.invalidateCache(tab.browser);
+      browserTabManager.invalidateCache();
 
       await showToast({
         style: Toast.Style.Success,

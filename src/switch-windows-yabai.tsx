@@ -425,15 +425,37 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     loadCachedWindows();
   }, []);
 
-  // Initial refresh when extension opens
+  // Initial refresh when extension opens + eagerly load browser tabs
   useEffect(() => {
     let isMounted = true;
 
     const initialize = async () => {
-      if (isMounted) {
-        console.log("Extension mounted, refreshing all data");
-        await refreshAllData(true);
-      }
+      if (!isMounted) return;
+      console.log("Extension mounted, refreshing all data");
+
+      // 1. Show cached tabs instantly (from previous session's LocalStorage)
+      browserTabManager.loadCachedTabs().then((cached) => {
+        if (isMounted && cached && cached.length > 0) {
+          setBrowserTabs(cached);
+          tabsLoadedRef.current = true;
+          console.log(`Loaded ${cached.length} cached browser tabs instantly`);
+        }
+      });
+
+      // 2. Refresh tabs from browsers in background (no yabai dependency)
+      browserTabManager
+        .queryAllTabs()
+        .then((tabs) => {
+          if (isMounted && tabs.length > 0) {
+            setBrowserTabs(tabs);
+            tabsLoadedRef.current = true;
+            console.log(`Refreshed ${tabs.length} browser tabs from browsers`);
+          }
+        })
+        .catch(() => {});
+
+      // 3. Refresh windows from yabai
+      await refreshAllData(true);
     };
 
     initialize();
@@ -887,7 +909,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       clearInterval(interval);
       setAutoSelectCountdown(null);
     };
-  }, [cycleIndex, isMergedFocusTimesReady, isFocusHistoryLoaded]); // eslint-disable-line
+  }, [cycleIndex, isMergedFocusTimesReady, isFocusHistoryLoaded]);
 
   const searchWebQuery = tabFilter.remainingSearchText.trim();
   const shouldShowSearchWebResult =
@@ -949,6 +971,22 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
               shortcut={{ modifiers: ["cmd", "shift"], key: "s" }}
             />
           )}
+          <Action
+            title={isLoadingTabs ? "Refreshing Tabs…" : "Refresh Browser Tabs"}
+            onAction={() => {
+              tabsLoadedRef.current = false;
+              browserTabManager.invalidateCache();
+              setIsLoadingTabs(true);
+              browserTabManager
+                .queryAllTabs()
+                .then((tabs) => {
+                  setBrowserTabs(tabs);
+                  tabsLoadedRef.current = true;
+                })
+                .finally(() => setIsLoadingTabs(false));
+            }}
+            shortcut={{ modifiers: ["cmd", "shift"], key: "t" }}
+          />
           <ActionPanel.Section title="Space Management">
             <SpaceManagementActions />
           </ActionPanel.Section>
@@ -966,6 +1004,13 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                 shortcut={{ modifiers: ["opt", "ctrl"], key: String(displayNum) as never }}
               />
             ))}
+          </ActionPanel.Section>
+          <ActionPanel.Section title="Yabai">
+            <Action.OpenInBrowser
+              title="Open Yabai Documentation"
+              url="https://github.com/koekeishiya/yabai/wiki"
+              shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
+            />
           </ActionPanel.Section>
         </ActionPanel>
       }
