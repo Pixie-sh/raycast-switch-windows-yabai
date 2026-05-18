@@ -10,7 +10,7 @@ import {
   List,
   LocalStorage,
 } from "@raycast/api";
-import { getFavicon } from "@raycast/utils";
+import { getFavicon, useLocalStorage } from "@raycast/utils";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Application, BrowserTab, BrowserType, SortMethod, YabaiWindow } from "./models";
 import {
@@ -34,6 +34,7 @@ import {
 } from "./display-actions-yabai";
 import Fuse from "fuse.js";
 import { IncompleteJsonError } from "./utils/json";
+import { parseCalcMode, evaluateExpression } from "./utils/calc";
 import { yabaiQueryManager } from "./utils/yabaiQueryManager";
 import { browserTabManager } from "./utils/browserTabManager";
 import { focusHistoryManager, getMergedFocusTimes } from "./utils/focusHistoryManager";
@@ -93,6 +94,7 @@ const TAB_SEARCH_FIELDS: SearchField<BrowserTab>[] = [
 ];
 
 const SEARCH_WEB_ITEM_ID = "search-web";
+const CALC_RESULT_ITEM_ID = "calc-result";
 
 function getWindowItemId(windowId: number): string {
   return `window-${windowId}`;
@@ -144,10 +146,28 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const searchText = useDebounce(inputText, 30); // Reduced debounce delay for better responsiveness
   const tabFilter = useMemo(() => parseTabFilter(searchText), [searchText]);
   const displayFilter = useMemo(() => parseDisplayFilter(searchText), [searchText]);
+  const calcMode = useMemo(() => parseCalcMode(searchText), [searchText]);
+  const calcResult = useMemo(
+    () => (calcMode.isCalcMode ? evaluateExpression(calcMode.expression) : null),
+    [calcMode],
+  );
   const hasActiveSearch = searchText.trim().length > 0;
   const [windows, setWindows] = useState<YabaiWindow[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
-  const [sortMethod, setSortMethod] = useState<SortMethod>(SortMethod.RECENTLY_USED);
+  // sortMethod is persisted; its read value is not currently used in sort logic
+  // (sorting always uses focus timestamps). Only setSortMethod is needed to respond to
+  // the "Sort by" actions in WindowActions.
+  const { setValue: setSortMethod } = useLocalStorage<SortMethod>("sortMethod", SortMethod.RECENTLY_USED);
+  const { value: _isShowingDetail, setValue: setIsShowingDetail } = useLocalStorage<boolean>("isShowingDetail", false);
+  const isShowingDetail = _isShowingDetail ?? false;
+  const [scopeFilter, setScopeFilter] = useState<"all" | "windows" | "applications" | "tabs">("all");
+  const effectiveTabFilter = useMemo(() => {
+    if (scopeFilter === "tabs") {
+      const remainingSearchText = tabFilter.hasTabFilter ? tabFilter.remainingSearchText : searchText.trim();
+      return { hasTabFilter: true, remainingSearchText };
+    }
+    return tabFilter;
+  }, [scopeFilter, tabFilter, searchText]);
   const [isSearching, setIsSearching] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
@@ -305,7 +325,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     [refreshWindows],
   );
 
-  // Load previous usage times, sort method, and focus history from local storage when the component mounts.
+  // Load previous usage times and focus history from local storage when the component mounts.
   useEffect(() => {
     (async () => {
       const storedTimes = await LocalStorage.getItem<string>("usageTimes");
@@ -314,16 +334,6 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
           setUsageTimes(JSON.parse(storedTimes));
         } catch (e) {
           console.error("error setting stored times;", e);
-        }
-      }
-
-      const storedSortMethod = await LocalStorage.getItem<string>("sortMethod");
-      if (storedSortMethod) {
-        try {
-          const parsedSortMethod = JSON.parse(storedSortMethod);
-          setSortMethod(parsedSortMethod as SortMethod);
-        } catch {
-          setSortMethod(SortMethod.USAGE);
         }
       }
 
@@ -352,15 +362,6 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
     return () => clearTimeout(timeoutId);
   }, [usageTimes]);
-
-  // Persist sort method in local storage when it changes (debounced to reduce I/O)
-  useEffect(() => {
-    const timeoutId = setTimeout(() => {
-      LocalStorage.setItem("sortMethod", JSON.stringify(sortMethod));
-    }, 500); // Debounce for 500ms
-
-    return () => clearTimeout(timeoutId);
-  }, [sortMethod]);
 
   // Persist focus history in local storage when it changes (debounced to reduce I/O)
   useEffect(() => {
@@ -572,21 +573,20 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     });
   }, [browserTabs]);
 
-  // Filter browser tabs based on search text (Spotlight-like behavior)
-  // @ prefix = show ONLY tabs, otherwise show tabs along with windows/apps
+  // Filter browser tabs based on search text (Spotlight-like behavior).
+  // @ prefix OR "Browser Tabs" scope = show ONLY tabs; otherwise included with windows/apps.
   const filteredTabs = useMemo(() => {
     if (!Array.isArray(browserTabs) || browserTabs.length === 0) return [];
 
-    // Determine the effective search text
-    const effectiveSearch = tabFilter.hasTabFilter ? tabFilter.remainingSearchText : searchText;
+    // Determine the effective search text (effectiveTabFilter already handles @ and scope)
+    const effectiveSearch = effectiveTabFilter.hasTabFilter ? effectiveTabFilter.remainingSearchText : searchText;
 
-    // If @ with no search term, return all tabs
-    // If no search at all (empty), don't show tabs (only show when searching)
-    if (tabFilter.hasTabFilter && !effectiveSearch.trim()) return browserTabs;
+    // If tab-only mode with no search, show all tabs
+    if (effectiveTabFilter.hasTabFilter && !effectiveSearch.trim()) return browserTabs;
     if (!effectiveSearch.trim()) return [];
 
     // Skip tabs if display filter is active (tabs don't have displays)
-    if (displayFilter.hasDisplayFilter && !tabFilter.hasTabFilter) return [];
+    if (displayFilter.hasDisplayFilter && !effectiveTabFilter.hasTabFilter) return [];
 
     return searchItems({
       items: browserTabs,
@@ -597,9 +597,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   }, [
     browserTabs,
     displayFilter.hasDisplayFilter,
+    effectiveTabFilter.hasTabFilter,
+    effectiveTabFilter.remainingSearchText,
     searchText,
-    tabFilter.hasTabFilter,
-    tabFilter.remainingSearchText,
     tabFuse,
   ]);
 
@@ -913,6 +913,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   const searchWebQuery = tabFilter.remainingSearchText.trim();
   const shouldShowSearchWebResult =
+    !calcMode.isCalcMode &&
     !(isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded) &&
     sortedWindows.length === 0 &&
     filteredApplications.length === 0 &&
@@ -920,21 +921,39 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     searchWebQuery.length > 0;
 
   const visibleItemIds = useMemo(() => {
-    const itemIds: string[] = [];
-
-    if (!tabFilter.hasTabFilter) {
-      itemIds.push(...sortedWindows.map((window) => getWindowItemId(window.id)));
-      itemIds.push(...filteredApplications.map((application) => getApplicationItemId(application)));
+    if (calcMode.isCalcMode) {
+      return [CALC_RESULT_ITEM_ID];
     }
 
-    itemIds.push(...filteredTabs.map((tab) => getTabItemId(tab.id)));
+    const itemIds: string[] = [];
+
+    if (!effectiveTabFilter.hasTabFilter && scopeFilter !== "tabs") {
+      if (scopeFilter !== "applications") {
+        itemIds.push(...sortedWindows.map((window) => getWindowItemId(window.id)));
+      }
+      if (scopeFilter !== "windows") {
+        itemIds.push(...filteredApplications.map((application) => getApplicationItemId(application)));
+      }
+    }
+
+    if (scopeFilter !== "windows" && scopeFilter !== "applications") {
+      itemIds.push(...filteredTabs.map((tab) => getTabItemId(tab.id)));
+    }
 
     if (shouldShowSearchWebResult) {
       itemIds.push(SEARCH_WEB_ITEM_ID);
     }
 
     return itemIds;
-  }, [filteredApplications, filteredTabs, shouldShowSearchWebResult, sortedWindows, tabFilter.hasTabFilter]);
+  }, [
+    calcMode.isCalcMode,
+    effectiveTabFilter.hasTabFilter,
+    filteredApplications,
+    filteredTabs,
+    scopeFilter,
+    shouldShowSearchWebResult,
+    sortedWindows,
+  ]);
 
   const selectedItemId = useMemo(() => {
     return getDefaultSelectedItemId({
@@ -951,9 +970,11 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   return (
     <List
-      isLoading={isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded}
+      isLoading={!calcMode.isCalcMode && (isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded)}
+      isShowingDetail={isShowingDetail}
       onSearchTextChange={setInputText}
-      searchBarPlaceholder="Search windows, apps, and browser tabs... (#3 for display, @ for tabs only)"
+      searchBarPlaceholder="Search windows, apps, tabs… (@ tabs, #N display, = calc)"
+      searchBarAccessory={<ScopeDropdown scopeFilter={scopeFilter} onScopeChange={setScopeFilter} />}
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
       selectedItemId={selectedItemId}
@@ -987,6 +1008,12 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
             }}
             shortcut={{ modifiers: ["cmd", "shift"], key: "t" }}
           />
+          <Action
+            title={isShowingDetail ? "Hide Detail Panel" : "Show Detail Panel"}
+            icon={Icon.Eye}
+            onAction={() => setIsShowingDetail(!isShowingDetail)}
+            shortcut={{ modifiers: ["cmd", "shift"], key: "y" }}
+          />
           <ActionPanel.Section title="Space Management">
             <SpaceManagementActions />
           </ActionPanel.Section>
@@ -1015,7 +1042,35 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </ActionPanel>
       }
     >
-      {sortedWindows.length > 0 && !tabFilter.hasTabFilter && (
+      {calcMode.isCalcMode && (
+        <List.Item
+          id={CALC_RESULT_ITEM_ID}
+          key={CALC_RESULT_ITEM_ID}
+          icon={Icon.Calculator}
+          title={
+            !calcMode.expression
+              ? "Type a math expression…"
+              : calcResult?.error
+                ? `Error: ${calcResult.error}`
+                : `= ${calcResult?.formatted ?? ""}`
+          }
+          subtitle={calcMode.expression || undefined}
+          actions={
+            <ActionPanel>
+              {calcResult?.result !== null && calcResult?.formatted && (
+                <Action.CopyToClipboard title="Copy Result" content={calcResult.formatted} />
+              )}
+              <Action
+                title="Clear"
+                onAction={() => setInputText("")}
+                shortcut={{ modifiers: ["cmd"], key: "backspace" }}
+              />
+            </ActionPanel>
+          }
+        />
+      )}
+
+      {!calcMode.isCalcMode && sortedWindows.length > 0 && !effectiveTabFilter.hasTabFilter && scopeFilter !== "applications" && scopeFilter !== "tabs" && (
         <List.Section
           title={(() => {
             return displayFilter.hasDisplayFilter && displayFilter.displayNumber !== null
@@ -1045,6 +1100,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                 ...(win["has-focus"] || win.focused ? [{ tag: { value: "focused", color: "#fbbf24" } }] : []),
               ]}
               keywords={win["has-focus"] || win.focused ? ["focused", "current"] : []}
+              detail={isShowingDetail ? <WindowDetailPanel win={win} mergedFocusTimes={mergedFocusTimes} /> : undefined}
               actions={
                 <WindowActions
                   windowId={win.id}
@@ -1084,6 +1140,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
                   windows={windows}
                   onCycleNext={cycleNext}
                   onCyclePrev={cyclePrev}
+                  onToggleDetail={() => setIsShowingDetail(!isShowingDetail)}
                 />
               }
             />
@@ -1091,7 +1148,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </List.Section>
       )}
 
-      {filteredApplications.length > 0 && !tabFilter.hasTabFilter && (
+      {!calcMode.isCalcMode && filteredApplications.length > 0 && !effectiveTabFilter.hasTabFilter && scopeFilter !== "windows" && scopeFilter !== "tabs" && (
         <List.Section title="Applications" subtitle={filteredApplications.length.toString()}>
           {filteredApplications.map((app) => (
             <List.Item
@@ -1099,6 +1156,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
               id={getApplicationItemId(app)}
               icon={{ fileIcon: app.path }}
               title={app.name}
+              detail={isShowingDetail ? <AppDetailPanel app={app} /> : undefined}
               actions={
                 <ActionPanel>
                   <Action
@@ -1153,7 +1211,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </List.Section>
       )}
 
-      {filteredTabs.length > 0 && (
+      {!calcMode.isCalcMode && filteredTabs.length > 0 && scopeFilter !== "windows" && scopeFilter !== "applications" && (
         <List.Section title="Browser Tabs" subtitle={filteredTabs.length.toString()}>
           {filteredTabs.map((tab) => (
             <List.Item
@@ -1166,6 +1224,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
               }
               title={tab.title || "Untitled"}
               subtitle={tab.domain}
+              detail={isShowingDetail ? <BrowserTabDetailPanel tab={tab} /> : undefined}
               accessories={[
                 { tag: { value: tab.browser.split(" ")[0], color: getBrowserColor(tab.browser) } },
                 ...(tab.isActive ? [{ tag: { value: "active", color: "#10b981" } }] : []),
@@ -1210,7 +1269,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         </List.Section>
       )}
 
-      {shouldShowSearchWebResult && (
+      {!calcMode.isCalcMode && shouldShowSearchWebResult && (
         <List.Item
           id={SEARCH_WEB_ITEM_ID}
           key={SEARCH_WEB_ITEM_ID}
@@ -1238,15 +1297,16 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         />
       )}
 
-      {!(isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded) &&
+      {!calcMode.isCalcMode &&
+        !(isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded) &&
         !shouldShowSearchWebResult &&
         sortedWindows.length === 0 &&
         filteredApplications.length === 0 &&
         filteredTabs.length === 0 && (
           <List.EmptyView
-            title={tabFilter.hasTabFilter ? "No Browser Tabs Found" : "No Windows or Applications Found"}
+            title={effectiveTabFilter.hasTabFilter ? "No Browser Tabs Found" : "No Windows or Applications Found"}
             description={
-              tabFilter.hasTabFilter
+              effectiveTabFilter.hasTabFilter
                 ? "No tabs match your search. Make sure browsers are running and Raycast has automation permissions."
                 : "No windows or applications were found."
             }
@@ -1272,6 +1332,7 @@ function WindowActions({
   windows,
   onCycleNext,
   onCyclePrev,
+  onToggleDetail,
 }: {
   windowId: number;
   windowApp: string;
@@ -1287,6 +1348,7 @@ function WindowActions({
   windows: YabaiWindow[];
   onCycleNext: () => void;
   onCyclePrev: () => void;
+  onToggleDetail: () => void;
 }) {
   const availableDisplays = useMemo(() => getAvailableDisplayNumbers(windows), [windows]);
   return (
@@ -1350,6 +1412,14 @@ function WindowActions({
         <Action title="Sort by Previous" onAction={() => setSortMethod(SortMethod.RECENTLY_USED)} />
         <Action title="Sort by Usage" onAction={() => setSortMethod(SortMethod.USAGE)} />
       </ActionPanel.Section>
+      <ActionPanel.Section title="View">
+        <Action
+          title="Toggle Detail Panel"
+          icon={Icon.Eye}
+          onAction={onToggleDetail}
+          shortcut={{ modifiers: ["cmd", "shift"], key: "y" }}
+        />
+      </ActionPanel.Section>
     </ActionPanel>
   );
 }
@@ -1403,4 +1473,115 @@ function getAppIcon(window: YabaiWindow, applications: Application[]) {
   }
 
   return { source: Icon.Window };
+}
+
+// ---- Detail panel components ----
+
+function WindowDetailPanel({
+  win,
+  mergedFocusTimes,
+}: {
+  win: YabaiWindow;
+  mergedFocusTimes: Record<number, number>;
+}) {
+  const lastFocusMs = mergedFocusTimes[win.id] ?? 0;
+  const lastFocusStr = lastFocusMs > 0 ? new Date(lastFocusMs).toLocaleString() : "Not recorded";
+  const frameStr = win.frame
+    ? `${Math.round(win.frame.w)} × ${Math.round(win.frame.h)} at (${Math.round(win.frame.x)}, ${Math.round(win.frame.y)})`
+    : undefined;
+
+  return (
+    <List.Item.Detail
+      metadata={
+        <List.Item.Detail.Metadata>
+          <List.Item.Detail.Metadata.Label title="App" text={win.app} />
+          <List.Item.Detail.Metadata.Label title="Title" text={win.title || "(no title)"} />
+          <List.Item.Detail.Metadata.Separator />
+          <List.Item.Detail.Metadata.Label title="Display" text={String(win.display ?? "?")} />
+          <List.Item.Detail.Metadata.Label title="Space" text={String(win.space ?? "?")} />
+          {frameStr && <List.Item.Detail.Metadata.Label title="Frame" text={frameStr} />}
+          <List.Item.Detail.Metadata.Separator />
+          <List.Item.Detail.Metadata.TagList title="State">
+            {win["has-focus"] || win.focused ? (
+              <List.Item.Detail.Metadata.TagList.Item text="Focused" color="#fbbf24" />
+            ) : null}
+            {win["is-native-fullscreen"] ? (
+              <List.Item.Detail.Metadata.TagList.Item text="Fullscreen" color="#60a5fa" />
+            ) : null}
+            {!win["has-focus"] && !win.focused ? (
+              <List.Item.Detail.Metadata.TagList.Item text="Background" color="#6b7280" />
+            ) : null}
+          </List.Item.Detail.Metadata.TagList>
+          <List.Item.Detail.Metadata.Separator />
+          <List.Item.Detail.Metadata.Label title="Window ID" text={String(win.id)} />
+          <List.Item.Detail.Metadata.Label title="PID" text={String(win.pid)} />
+          <List.Item.Detail.Metadata.Label title="Last Focused" text={lastFocusStr} />
+        </List.Item.Detail.Metadata>
+      }
+    />
+  );
+}
+
+function BrowserTabDetailPanel({ tab }: { tab: BrowserTab }) {
+  return (
+    <List.Item.Detail
+      metadata={
+        <List.Item.Detail.Metadata>
+          <List.Item.Detail.Metadata.Label title="Title" text={tab.title || "Untitled"} />
+          <List.Item.Detail.Metadata.Label title="Domain" text={tab.domain || "—"} />
+          <List.Item.Detail.Metadata.Label title="URL" text={tab.url || "—"} />
+          <List.Item.Detail.Metadata.Separator />
+          <List.Item.Detail.Metadata.Label title="Browser" text={tab.browser} />
+          <List.Item.Detail.Metadata.Label title="Window" text={String(tab.windowIndex)} />
+          <List.Item.Detail.Metadata.Label title="Tab" text={String(tab.tabIndex)} />
+          <List.Item.Detail.Metadata.Separator />
+          <List.Item.Detail.Metadata.TagList title="State">
+            {tab.isActive ? (
+              <List.Item.Detail.Metadata.TagList.Item text="Active" color="#10b981" />
+            ) : (
+              <List.Item.Detail.Metadata.TagList.Item text="Background" color="#6b7280" />
+            )}
+          </List.Item.Detail.Metadata.TagList>
+        </List.Item.Detail.Metadata>
+      }
+    />
+  );
+}
+
+function AppDetailPanel({ app }: { app: Application }) {
+  return (
+    <List.Item.Detail
+      metadata={
+        <List.Item.Detail.Metadata>
+          <List.Item.Detail.Metadata.Label title="Name" text={app.name} />
+          <List.Item.Detail.Metadata.Label title="Path" text={app.path || "Unknown"} />
+        </List.Item.Detail.Metadata>
+      }
+    />
+  );
+}
+
+// ---- Scope filter dropdown ----
+
+function ScopeDropdown({
+  scopeFilter,
+  onScopeChange,
+}: {
+  scopeFilter: "all" | "windows" | "applications" | "tabs";
+  onScopeChange: (value: "all" | "windows" | "applications" | "tabs") => void;
+}) {
+  return (
+    <List.Dropdown
+      tooltip="Filter by type"
+      value={scopeFilter}
+      onChange={(v) => onScopeChange(v as "all" | "windows" | "applications" | "tabs")}
+    >
+      <List.Dropdown.Item title="All" value="all" />
+      <List.Dropdown.Section title="Type">
+        <List.Dropdown.Item title="Windows" value="windows" icon={Icon.Window} />
+        <List.Dropdown.Item title="Applications" value="applications" icon={Icon.Desktop} />
+        <List.Dropdown.Item title="Browser Tabs" value="tabs" icon={Icon.Globe} />
+      </List.Dropdown.Section>
+    </List.Dropdown>
+  );
 }
