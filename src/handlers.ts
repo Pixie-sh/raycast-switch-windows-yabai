@@ -1,16 +1,50 @@
 import { promisify } from "node:util";
-import { exec, execFile } from "node:child_process";
+import { execFile, ExecFileOptionsWithStringEncoding } from "node:child_process";
 import { closeMainWindow, showToast, Toast } from "@raycast/api";
 import { showFailureToast } from "@raycast/utils";
-import { ENV, YABAI, JQ, YabaiSpace, YabaiWindow, Application, YabaiDisplay, DisplayInfo } from "./models";
+import { ENV, YABAI, YabaiSpace, YabaiWindow, Application, DisplayInfo } from "./models";
+import { EXEC_FILE_OPTIONS } from "./utils/command";
+import {
+  parseYabaiDisplay,
+  parseYabaiDisplays,
+  parseYabaiSpace,
+  parseYabaiSpaces,
+  parseYabaiWindow,
+  parseYabaiWindows,
+} from "./utils/runtimeData";
+import {
+  createSpaceOnDisplay as createSpaceOnDisplaySafely,
+  getAdjacentSpace,
+  isSameWindowIdentity,
+  isUnsafeSpaceIndexMutationDisabled,
+  planAggregation,
+  planDispersal,
+} from "./utils/windowOperations";
 
-const execFilePromise = promisify(execFile);
-const execPromise = promisify(exec);
+const rawExecFilePromise = promisify(execFile);
+type StringExecFileOptions = Partial<ExecFileOptionsWithStringEncoding>;
+const execFilePromise = (file: string, args: string[], options: StringExecFileOptions = {}) =>
+  rawExecFilePromise(file, args, {
+    ...EXEC_FILE_OPTIONS,
+    ...options,
+    encoding: "utf8",
+  } as ExecFileOptionsWithStringEncoding);
 
-// Helper to parse JSON from exec output (handles both string and Buffer)
-function parseExecOutput<T>(output: string | Buffer): T {
-  const str = typeof output === "string" ? output : output.toString();
-  return JSON.parse(str) as T;
+function outputString(output: string | Buffer): string {
+  return typeof output === "string" ? output : output.toString();
+}
+
+async function queryExpectedWindow(expected: Pick<YabaiWindow, "id" | "app" | "title">): Promise<YabaiWindow> {
+  const result = await execFilePromise(YABAI, ["-m", "query", "--windows", "--window", String(expected.id)], {
+    env: ENV,
+    encoding: "utf8",
+  });
+  if (result.stderr.trim()) throw new Error(result.stderr.trim());
+  const live = parseYabaiWindow(outputString(result.stdout)) as YabaiWindow;
+  if (!isSameWindowIdentity(expected, live)) {
+    throw new Error("Selected window identity changed; refresh and try again");
+  }
+  return live;
 }
 
 /**
@@ -41,8 +75,9 @@ function isUtilityApp(appName: string): boolean {
 export const handleFocusWindow = (
   windowId: number,
   windowApp: string,
-  onFocused: (id: number) => void,
+  onFocused: (id: number) => void | Promise<void>,
   applications: Application[] = [],
+  expectedTitle?: string,
 ) => {
   return async () => {
     // Check if this is a utility app that requires special handling
@@ -54,12 +89,12 @@ export const handleFocusWindow = (
 
       try {
         const strategy = await launchOrFocusApplication(windowApp, applications);
+        await closeMainWindow();
         await showToast({
           style: Toast.Style.Success,
           title: `${windowApp} activated`,
           message: `Used ${strategy} (utility app)`,
         });
-        onFocused(windowId);
       } catch (launchError) {
         console.error(`Failed to launch utility app ${windowApp}:`, launchError);
         await showFailureToast(launchError, { title: "Failed to Activate Utility App" });
@@ -68,12 +103,10 @@ export const handleFocusWindow = (
     }
 
     try {
-      // Close the Raycast window BEFORE issuing the yabai focus command.
-      // This prevents the "second click required" race condition where Raycast's
-      // closeMainWindow() — called after the focus — snaps macOS focus back to
-      // the original space/display, undoing the yabai space switch.
-      // We also add a short delay after close to let macOS fully settle window
-      // focus before yabai takes over, preventing a second-click requirement.
+      if (expectedTitle === undefined) throw new Error("Window title is required to verify identity");
+      await queryExpectedWindow({ id: windowId, app: windowApp, title: expectedTitle });
+
+      // Close Raycast before focus so it cannot steal focus back.
       await closeMainWindow();
       await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -94,8 +127,6 @@ export const handleFocusWindow = (
               title: `${windowApp} launched`,
               message: `Used ${strategy} since no window was found`,
             });
-            // Still call onFocused to update usage times, even though we launched instead of focused
-            onFocused(windowId);
           } catch (launchError) {
             console.error(`Failed to launch application ${windowApp}:`, launchError);
             await showFailureToast(launchError, { title: "Failed to Launch Application" });
@@ -126,7 +157,7 @@ export const handleFocusWindow = (
             }`,
           );
         }
-        onFocused(windowId);
+        await onFocused(windowId);
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error while focusing window";
@@ -143,8 +174,6 @@ export const handleFocusWindow = (
             title: `${windowApp} launched`,
             message: `Used ${strategy} since no window was found`,
           });
-          // Still call onFocused to update usage times, even though we launched instead of focused
-          onFocused(windowId);
         } catch (launchError) {
           console.error(`Failed to launch application ${windowApp}:`, launchError);
           await showFailureToast(launchError, { title: "Failed to Launch Application" });
@@ -157,124 +186,87 @@ export const handleFocusWindow = (
   };
 };
 
-// Close a window and remove it from the list.
-export const handleCloseWindow = (windowId: number, windowApp: string, onRemove: (id: number) => void) => {
-  return async () => {
-    await showToast({ style: Toast.Style.Animated, title: "Closing Window..." });
-    try {
-      const { stderr } = await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--close"], {
-        env: ENV,
-      });
-      if (stderr?.trim()) {
-        await showFailureToast(new Error(stderr.trim()), { title: "Yabai Error - Close Window" });
-      } else {
-        await showToast({
-          style: Toast.Style.Success,
-          title: "Window Closed",
-          message: `Window ${windowApp} closed`,
-        });
-        onRemove(windowId);
-      }
-    } catch (error: unknown) {
-      await showFailureToast(error, { title: "Failed to Close Window" });
-    }
-  };
-};
-
 // Aggregate all windows with the same app name into an empty or newly created space.
-export const handleAggregateToSpace = (windowId: number, windowApp: string) => {
+export const handleAggregateToSpace = (windowId: number, windowApp: string, expectedTitle: string) => {
   return async () => {
-    await showToast({
-      style: Toast.Style.Animated,
-      title: "Aggregating Windows...",
-    });
-    try {
-      // Step 1: Query the current window for its space.
-      const currentWinResult = await execFilePromise(
-        YABAI,
-        ["-m", "query", "--windows", "--window", windowId.toString()],
-        { env: ENV },
+    if (isUnsafeSpaceIndexMutationDisabled()) {
+      await showFailureToast(
+        new Error("Aggregation is disabled because yabai space indices can renumber during the operation"),
+        {
+          title: "Aggregation Disabled for Safety",
+        },
       );
-      const currentWin = parseExecOutput<YabaiWindow>(currentWinResult.stdout);
-      const currentSpace = currentWin.space;
-      console.log("Current space:", currentSpace);
-
-      // Step 2: Query all windows and count those in the current space.
-      const allWinsResult = await execFilePromise(YABAI, ["-m", "query", "--windows"], { env: ENV });
-      const allWindows = parseExecOutput<YabaiWindow[]>(allWinsResult.stdout);
-      const windowsInCurrentSpace = allWindows.filter((w) => w.space === currentSpace);
-      console.log("Windows in current space:", windowsInCurrentSpace.length);
-
-      if (windowsInCurrentSpace.length < 2) {
+      return;
+    }
+    await showToast({ style: Toast.Style.Animated, title: "Aggregating Windows..." });
+    try {
+      const selectedWindow = await queryExpectedWindow({ id: windowId, app: windowApp, title: expectedTitle });
+      const windowsResult = await execFilePromise(YABAI, ["-m", "query", "--windows"], {
+        env: ENV,
+        encoding: "utf8",
+      });
+      const allWindows = parseYabaiWindows(outputString(windowsResult.stdout));
+      const spacesResult = await execFilePromise(
+        YABAI,
+        ["-m", "query", "--spaces", "--display", String(selectedWindow.display)],
+        { env: ENV, encoding: "utf8" },
+      );
+      const spaces = parseYabaiSpaces(outputString(spacesResult.stdout));
+      let plan = planAggregation(allWindows, spaces, selectedWindow);
+      if (plan.matchingWindowIds.length < 2) {
         await showToast({
           style: Toast.Style.Success,
           title: "Nothing to Aggregate",
-          message: "The current space contains only one window.",
+          message: `Only one ${windowApp} window is open`,
         });
         return;
       }
 
-      // Step 3: Find an empty space.
-      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
-      const spaces = parseExecOutput<YabaiSpace[]>(spacesResult.stdout);
-      let targetSpace = spaces.find((s) => Array.isArray(s.windows) && s.windows.length === 0);
-
-      // Step 4: Create a new space if no empty one is found.
-      if (!targetSpace) {
-        const createResult = await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
-        console.log("Space creation output:", createResult.stdout);
-        const spacesResultAfter = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
-        const updatedSpaces = parseExecOutput<YabaiSpace[]>(spacesResultAfter.stdout);
-        targetSpace = updatedSpaces.find((s) => Array.isArray(s.windows) && s.windows.length === 0);
+      if (plan.needsCreate) {
+        const created = await createSpaceOnDisplay(plan.targetDisplay);
+        plan = { ...plan, targetSpaceIndex: created.index, needsCreate: false };
       }
 
-      if (!targetSpace) {
-        await showFailureToast(new Error("Could not find or create an empty space."), { title: "Aggregation Failed" });
-        return;
-      }
-
-      const targetSpaceId = targetSpace.index;
-      console.log("Target space id:", targetSpaceId);
-
-      // Step 5: Filter windows of the same app (case‑insensitive).
-      const matchingWindows = allWindows.filter((w) => w.app.toLowerCase() === windowApp.toLowerCase());
-      console.log(`Moving ${matchingWindows.length} windows for app '${windowApp}' to space ${targetSpaceId}.`);
-
-      // Step 6: Move each matching window using the correct order of parameters.
-      for (const win of matchingWindows) {
+      if (plan.targetSpaceIndex === undefined) throw new Error("No target space available");
+      const failures: string[] = [];
+      const movedIds: number[] = [];
+      const expectedById = new Map(allWindows.map((window) => [window.id, window]));
+      for (const id of plan.matchingWindowIds) {
         try {
-          const moveResult = await execFilePromise(
+          const expected = expectedById.get(id);
+          if (!expected) throw new Error("Window identity was not captured");
+          await queryExpectedWindow(expected as YabaiWindow);
+          const move = await execFilePromise(
             YABAI,
-            ["-m", "window", win.id.toString(), "--space", targetSpaceId.toString()],
-            { env: ENV },
+            ["-m", "window", String(id), "--space", String(plan.targetSpaceIndex)],
+            { env: ENV, encoding: "utf8" },
           );
-          if (moveResult.stderr?.trim()) {
-            console.error(`Error moving window ${win.id}: ${moveResult.stderr.trim()}`);
-          } else {
-            console.log(`Moved window ${win.id} to space ${targetSpaceId}.`);
-          }
-        } catch (innerError: unknown) {
-          console.error(
-            `Exception while moving window ${win.id}: ${
-              innerError instanceof Error ? innerError.message : "Unknown error"
-            }`,
-          );
+          if (move.stderr.trim()) throw new Error(move.stderr.trim());
+          movedIds.push(id);
+        } catch (error) {
+          failures.push(`window ${id}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-
-      // Step 7: Focus the target space.
-      await execFilePromise(YABAI, ["-m", "space", "--focus", targetSpaceId.toString()], { env: ENV });
-
-      // Step 8: Focus one of the moved windows (here, the first one in the matching list).
-      if (matchingWindows.length > 0) {
-        const focusWindowId = matchingWindows[0].id;
-        await execFilePromise(YABAI, ["-m", "window", focusWindowId.toString(), "--focus"], { env: ENV });
+      if (movedIds.length > 0) {
+        await execFilePromise(YABAI, ["-m", "space", "--focus", String(plan.targetSpaceIndex)], {
+          env: ENV,
+          encoding: "utf8",
+        });
+        await execFilePromise(YABAI, ["-m", "window", String(movedIds[0]), "--focus"], {
+          env: ENV,
+          encoding: "utf8",
+        });
       }
-
+      if (failures.length > 0) {
+        await showFailureToast(new Error(failures.join("; ")), {
+          title: `Moved ${movedIds.length} of ${plan.matchingWindowIds.length} ${windowApp} Windows`,
+        });
+        return;
+      }
       await showToast({
         style: Toast.Style.Success,
         title: "Aggregation Complete",
-        message: `All "${windowApp}" windows have been moved to space ${targetSpaceId} and one has been focused.`,
+        message: `${movedIds.length} ${windowApp} windows moved to space ${plan.targetSpaceIndex}`,
       });
     } catch (error: unknown) {
       console.error("Aggregation failed:", error);
@@ -283,33 +275,20 @@ export const handleAggregateToSpace = (windowId: number, windowApp: string) => {
   };
 };
 
-export const handleCloseEmptySpaces = (windowId: number, onRemove: (id: number) => void) => {
-  return async () => {
-    await showToast({ style: Toast.Style.Animated, title: "Closing Empty Spaces..." });
-    try {
-      const command = `${YABAI} -m query --spaces | ${JQ} '.[] | select(.windows | length == 0) | .index' | xargs -I {} ${YABAI} -m space {} --destroy`;
-      const { stderr } = await execPromise(command, { env: ENV });
-      if (stderr?.trim()) {
-        console.error(stderr);
-        await showFailureToast(new Error(stderr.trim()), { title: "Yabai Error - Close Empty Spaces" });
-      } else {
-        await showToast({
-          style: Toast.Style.Success,
-          title: "Spaces Closed",
-          message: "Empty spaces closed",
-        });
-        onRemove(windowId);
-      }
-    } catch (error: unknown) {
-      await showFailureToast(error, { title: "Failed to Close Empty Spaces" });
-    }
-  };
-};
-export const handleMoveWindowToDisplay = (windowId: number, windowApp: string, displayIdx: string) => {
+export const handleMoveWindowToDisplay = (
+  windowId: number,
+  windowApp: string,
+  expectedTitle: string,
+  displayIdx: string,
+) => {
   return async () => {
     await showToast({ style: Toast.Style.Animated, title: `Moving Window to Display #${displayIdx}...` });
     try {
-      // Move the window to the specified display
+      const targetDisplay = Number(displayIdx);
+      if (!Number.isInteger(targetDisplay) || targetDisplay < 1) throw new Error(`Invalid display: ${displayIdx}`);
+      const liveWindow = await queryExpectedWindow({ id: windowId, app: windowApp, title: expectedTitle });
+      if (liveWindow.display === targetDisplay) return;
+
       const { stderr } = await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--display", displayIdx], {
         env: ENV,
       });
@@ -338,64 +317,87 @@ export const handleMoveWindowToDisplay = (windowId: number, windowApp: string, d
 
 export const handleDisperseWindowsBySpace = (screenIdx: string) => {
   return async () => {
+    if (isUnsafeSpaceIndexMutationDisabled()) {
+      await showFailureToast(
+        new Error("Dispersal is disabled because yabai space indices can renumber during the operation"),
+        {
+          title: "Dispersal Disabled for Safety",
+        },
+      );
+      return;
+    }
     await showToast({ style: Toast.Style.Animated, title: "Dispersing Windows Across Spaces..." });
     try {
-      // Step 1: Query all windows on the given display
+      const display = Number(screenIdx);
+      if (!Number.isInteger(display) || display < 1) throw new Error(`Invalid display index: ${screenIdx}`);
       const windowsResult = await execFilePromise(YABAI, ["-m", "query", "--windows", "--display", screenIdx], {
         env: ENV,
+        encoding: "utf8",
       });
-
-      // Filter out windows in native MacOS fullscreen mode
-      const allWindows = parseExecOutput<YabaiWindow[]>(windowsResult.stdout);
-      const windows: YabaiWindow[] = allWindows.filter((win: YabaiWindow) => !win["is-native-fullscreen"]);
-
-      // Step 2: Query all spaces on the given display
+      const windows = parseYabaiWindows(outputString(windowsResult.stdout));
       const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--display", screenIdx], {
         env: ENV,
+        encoding: "utf8",
       });
-      let spaces = parseExecOutput<YabaiSpace[]>(spacesResult.stdout);
+      let spaces = parseYabaiSpaces(outputString(spacesResult.stdout));
+      const initialPlan = planDispersal(windows, spaces, display);
 
-      // Step 3: Create new spaces if needed so that each window has a space
-      const spacesToCreate = windows.length - spaces.length - 1;
-      if (spacesToCreate > 0) {
-        for (let i = 0; i < spacesToCreate; i++) {
-          await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
+      if (initialPlan.spacesNeeded > 0) {
+        for (let index = 0; index < initialPlan.spacesNeeded; index += 1) {
+          await createSpaceOnDisplay(display);
         }
-        // Re-query spaces after creation
-        const updatedSpacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
-        spaces = parseExecOutput<YabaiSpace[]>(updatedSpacesResult.stdout);
+        const updated = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--display", screenIdx], {
+          env: ENV,
+          encoding: "utf8",
+        });
+        spaces = parseYabaiSpaces(outputString(updated.stdout));
       }
 
-      // Step 4: Disperse each window to its corresponding space
-      for (let i = 0; i < windows.length - 1; i++) {
-        const window = windows[i];
-        const space = spaces[i];
+      const plan = planDispersal(windows, spaces, display);
+      if (plan.assignments.length === 0) {
+        await showToast({
+          style: Toast.Style.Success,
+          title: "Nothing to Disperse",
+          message: `No eligible windows on Display ${display}`,
+        });
+        return;
+      }
 
-        // Move the window into the corresponding space
-        const moveResult = await execFilePromise(
-          YABAI,
-          ["-m", "window", window.id.toString(), "--space", space.index.toString()],
-          { env: ENV },
-        );
-
-        if (moveResult.stderr?.trim()) {
-          console.error(`Error moving window ${window.id}: ${moveResult.stderr.trim()}`);
-        } else {
-          console.log(`Moved window ${window.id} to space ${space.index}.`);
+      const failures: string[] = [];
+      let moved = 0;
+      const expectedById = new Map(windows.map((window) => [window.id, window]));
+      for (const assignment of plan.assignments) {
+        try {
+          const expected = expectedById.get(assignment.windowId);
+          if (!expected) throw new Error("Window identity was not captured");
+          await queryExpectedWindow(expected as YabaiWindow);
+          const result = await execFilePromise(
+            YABAI,
+            ["-m", "window", assignment.windowId.toString(), "--space", assignment.spaceIndex.toString()],
+            { env: ENV, encoding: "utf8" },
+          );
+          if (result.stderr.trim()) throw new Error(result.stderr.trim());
+          moved += 1;
+        } catch (error) {
+          failures.push(`window ${assignment.windowId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-
-      try {
-        // Added: Focus on the first space to ensure a target for focus exists.
-        await execFilePromise(YABAI, ["-m", "space", "--focus", "1"], { env: ENV });
-      } catch {
-        /*ignore, error will be thrown*/
+      if (plan.focusSpaceIndex !== undefined) {
+        await execFilePromise(YABAI, ["-m", "space", "--focus", plan.focusSpaceIndex.toString()], {
+          env: ENV,
+          encoding: "utf8",
+        });
       }
-
+      if (failures.length > 0) {
+        await showFailureToast(new Error(failures.join("; ")), {
+          title: `Moved ${moved} of ${plan.assignments.length} Windows`,
+        });
+        return;
+      }
       await showToast({
         style: Toast.Style.Success,
-        title: `Dispersal for Display #${screenIdx} complete`,
-        message: "Windows have been evenly distributed and the first space is focused.",
+        title: `Dispersal for Display #${display} Complete`,
+        message: `${moved} window${moved === 1 ? "" : "s"} distributed across local spaces`,
       });
     } catch (error: unknown) {
       console.error("Dispersal failed:", error);
@@ -404,144 +406,74 @@ export const handleDisperseWindowsBySpace = (screenIdx: string) => {
   };
 };
 
+async function querySpacesOnDisplay(display: number): Promise<YabaiSpace[]> {
+  const result = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--display", String(display)], {
+    env: ENV,
+    encoding: "utf8",
+  });
+  return parseYabaiSpaces(outputString(result.stdout)) as YabaiSpace[];
+}
+
+async function createSpaceOnDisplay(display: number): Promise<YabaiSpace> {
+  return createSpaceOnDisplaySafely(
+    display,
+    () => querySpacesOnDisplay(display),
+    (args) => execFilePromise(YABAI, args, { env: ENV, encoding: "utf8" }),
+  );
+}
+
 /**
- * Open a window in a new space on the current display
- * This function always creates a new space, moves the window to it, and focuses both the space and window.
- * If windowId is -1 (application launch), creates space on display 1.
- * @param windowId - The ID of the window to move (-1 for application launch)
- * @param windowApp - The name of the application for display in toast notifications
+ * Open a window in a new space on its display, or launch an app on the focused display.
  */
-export const handleOpenWindowInNewSpace = (windowId: number, windowApp: string) => {
+export const handleOpenWindowInNewSpace = (windowId: number, windowApp: string, expectedTitle?: string) => {
   return async () => {
     await showToast({ style: Toast.Style.Animated, title: "Opening in New Space..." });
+    let createdSpace: YabaiSpace | undefined;
     try {
-      let targetDisplay = 1; // Default to display 1 for application launches
-      let windowExists = false;
-
-      // Step 1: Check if we have a valid window ID
-      if (windowId > 0) {
-        try {
-          // Try to get the current window info to determine its display
-          const windowResult = await execFilePromise(
-            YABAI,
-            ["-m", "query", "--windows", "--window", windowId.toString()],
-            {
-              env: ENV,
-            },
-          );
-
-          const windowInfo = parseExecOutput<YabaiWindow>(windowResult.stdout);
-          targetDisplay = windowInfo.display || 1;
-          windowExists = true;
-          console.log(`Window ${windowId} is on display ${targetDisplay}`);
-        } catch {
-          // Window doesn't exist, we're launching an application
-          console.log(`Window ${windowId} not found, will create space on display 1 for application launch`);
-          windowExists = false;
-        }
+      let targetDisplay: number;
+      let expectedWindow: YabaiWindow | undefined;
+      const windowExists = windowId > 0;
+      if (windowExists) {
+        if (expectedTitle === undefined) throw new Error("Window title is required to verify identity");
+        const window = await queryExpectedWindow({ id: windowId, app: windowApp, title: expectedTitle });
+        if (!window.display) throw new Error("Selected window has no display");
+        expectedWindow = window;
+        targetDisplay = window.display;
       } else {
-        console.log(`No window ID provided, will create space on display 1 for application launch`);
-      }
-
-      // Step 2: Get the current focused space on the target display to know where to create the new space
-      const displayResult = await execFilePromise(
-        YABAI,
-        ["-m", "query", "--displays", "--display", targetDisplay.toString()],
-        {
+        const result = await execFilePromise(YABAI, ["-m", "query", "--displays", "--display"], {
           env: ENV,
-        },
-      );
-      parseExecOutput<YabaiDisplay>(displayResult.stdout); // Verify display exists
-
-      // Step 3: Create a new space on the target display
-      console.log(`Creating new space on display ${targetDisplay}`);
-
-      // Check if we need to focus the display first
-      // Only focus if it's not already the current display
-      try {
-        const currentDisplayResult = await execFilePromise(YABAI, ["-m", "query", "--displays", "--display"], {
-          env: ENV,
+          encoding: "utf8",
         });
-        const currentDisplayInfo = parseExecOutput<YabaiDisplay>(currentDisplayResult.stdout);
-
-        if (currentDisplayInfo.index !== targetDisplay) {
-          console.log(`Switching focus from display ${currentDisplayInfo.index} to display ${targetDisplay}`);
-          await execFilePromise(YABAI, ["-m", "display", "--focus", targetDisplay.toString()], { env: ENV });
-        } else {
-          console.log(`Display ${targetDisplay} is already focused`);
-        }
-      } catch {
-        // If we can't query the current display, try to focus anyway but don't fail if it errors
-        console.log(`Could not query current display, attempting to focus display ${targetDisplay}`);
-        try {
-          await execFilePromise(YABAI, ["-m", "display", "--focus", targetDisplay.toString()], { env: ENV });
-        } catch (focusError: unknown) {
-          // Ignore "already focused" errors
-          const errorObj = focusError as { stderr?: string };
-          if (!errorObj?.stderr?.includes("already focused")) {
-            throw focusError;
-          }
-          console.log(`Display ${targetDisplay} was already focused`);
-        }
+        targetDisplay = parseYabaiDisplay(outputString(result.stdout)).index;
       }
 
-      // Create the new space
-      await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
-
-      // Step 4: Query spaces to get the newly created space
-      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
-      const allSpaces = parseExecOutput<YabaiSpace[]>(spacesResult.stdout);
-
-      // Find the newly created space on the target display
-      // It should be the space with the highest index on the target display
-      const spacesOnTargetDisplay = allSpaces.filter((space) => space.display === targetDisplay);
-      const newSpace = spacesOnTargetDisplay.sort((a, b) => b.index - a.index)[0];
-
-      if (!newSpace) {
-        throw new Error(`Failed to create or find new space on display ${targetDisplay}`);
-      }
-
-      const targetSpaceIndex = newSpace.index;
-      console.log(`Created new space ${targetSpaceIndex} on display ${targetDisplay}`);
-
-      // Step 5: If we have a window, move it to the new space
-      if (windowExists && windowId > 0) {
-        const moveResult = await execFilePromise(
+      createdSpace = await createSpaceOnDisplay(targetDisplay);
+      if (windowExists) {
+        if (!expectedWindow) throw new Error("Window identity was not captured");
+        await queryExpectedWindow(expectedWindow);
+        const move = await execFilePromise(
           YABAI,
-          ["-m", "window", windowId.toString(), "--space", targetSpaceIndex.toString()],
-          { env: ENV },
+          ["-m", "window", String(windowId), "--space", String(createdSpace.index)],
+          { env: ENV, encoding: "utf8" },
         );
-
-        if (moveResult.stderr?.trim()) {
-          console.error(`Error moving window ${windowId}: ${moveResult.stderr.trim()}`);
-          await showFailureToast(new Error(moveResult.stderr.trim()), {
-            title: "Yabai Error - Move Window to New Space",
-          });
-          return;
-        }
+        if (move.stderr.trim()) throw new Error(move.stderr.trim());
       }
-
-      // Step 6: Focus the new space
-      await execFilePromise(YABAI, ["-m", "space", "--focus", targetSpaceIndex.toString()], { env: ENV });
-
-      // Step 7: If we have a window, focus it. Otherwise, launch the application
-      if (windowExists && windowId > 0) {
-        await execFilePromise(YABAI, ["-m", "window", windowId.toString(), "--focus"], { env: ENV });
-        console.log(
-          `Successfully opened window ${windowId} in new space ${targetSpaceIndex} on display ${targetDisplay}`,
-        );
+      await execFilePromise(YABAI, ["-m", "space", "--focus", String(createdSpace.index)], {
+        env: ENV,
+        encoding: "utf8",
+      });
+      if (windowExists) {
+        await execFilePromise(YABAI, ["-m", "window", String(windowId), "--focus"], {
+          env: ENV,
+          encoding: "utf8",
+        });
       } else {
-        // Launch the application in the new space
-        console.log(`Launching ${windowApp} in new space ${targetSpaceIndex} on display ${targetDisplay}`);
-        await execPromise(`open -a "${windowApp}"`, { env: ENV });
+        await execFilePromise("/usr/bin/open", ["-a", windowApp], { env: ENV, encoding: "utf8" });
       }
-
       await showToast({
         style: Toast.Style.Success,
         title: windowExists ? "Window Opened in New Space" : "Application Launched in New Space",
-        message: `${windowApp} has been ${
-          windowExists ? "moved to" : "launched in"
-        } a new space on display ${targetDisplay}.`,
+        message: `${windowApp} ${windowExists ? "moved to" : "launched in"} space ${createdSpace.index} on Display ${targetDisplay}`,
       });
     } catch (error: unknown) {
       console.error("Open in new space failed:", error);
@@ -550,85 +482,60 @@ export const handleOpenWindowInNewSpace = (windowId: number, windowApp: string) 
   };
 };
 
-// Move window to an empty space on the current display, or create a new space if none exists
-export const handleMoveToDisplaySpace = (windowId: number, windowApp: string) => {
+// Move window to an empty space on its display, or create one there if needed.
+export const handleMoveToDisplaySpace = (windowId: number, windowApp: string, expectedTitle: string) => {
   return async () => {
-    await showToast({ style: Toast.Style.Animated, title: "Moving Window to Display Space..." });
-    try {
-      // Step 1: Get the current window info to determine its display
-      const windowResult = await execFilePromise(YABAI, ["-m", "query", "--windows", "--window", windowId.toString()], {
-        env: ENV,
-      });
-
-      const windowInfo = parseExecOutput<YabaiWindow>(windowResult.stdout);
-      const currentDisplay = windowInfo.display;
-
-      console.log(`Window ${windowId} is on display ${currentDisplay}`);
-
-      // Step 2: Query all spaces to find empty ones on the current display
-      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
-      const allSpaces = parseExecOutput<YabaiSpace[]>(spacesResult.stdout);
-
-      // Find empty spaces on the current display
-      const emptySpacesOnDisplay = allSpaces.filter(
-        (space) => space.display === currentDisplay && Array.isArray(space.windows) && space.windows.length === 0,
+    if (isUnsafeSpaceIndexMutationDisabled()) {
+      await showFailureToast(
+        new Error("Empty-space moves are disabled because yabai space indices can renumber during the operation"),
+        {
+          title: "Empty-Space Move Disabled for Safety",
+        },
       );
-
-      let targetSpaceIndex: number;
-
-      if (emptySpacesOnDisplay.length > 0) {
-        // Use the first empty space found
-        targetSpaceIndex = emptySpacesOnDisplay[0].index;
-        console.log(`Found empty space ${targetSpaceIndex} on display ${currentDisplay}`);
+      return;
+    }
+    await showToast({ style: Toast.Style.Animated, title: "Moving Window to Display Space..." });
+    let createdSpace: YabaiSpace | undefined;
+    try {
+      const window = await queryExpectedWindow({ id: windowId, app: windowApp, title: expectedTitle });
+      if (!window.display) throw new Error("Selected window has no display");
+      const localSpaces = await querySpacesOnDisplay(window.display);
+      let target = localSpaces
+        .filter((space) => space.windows.length === 0)
+        .sort((left, right) => left.index - right.index)[0];
+      if (!target) {
+        createdSpace = await createSpaceOnDisplay(window.display);
+        target = createdSpace;
       } else {
-        // Create a new space
-        console.log(`No empty spaces found on display ${currentDisplay}, creating new space`);
-        await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
-
-        // Re-query spaces to get the newly created space
-        const updatedSpacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
-        const updatedSpaces = parseExecOutput<YabaiSpace[]>(updatedSpacesResult.stdout);
-
-        // Find the newly created empty space on the current display
-        const newEmptySpaces = updatedSpaces.filter(
-          (space) => space.display === currentDisplay && Array.isArray(space.windows) && space.windows.length === 0,
-        );
-
-        if (newEmptySpaces.length > 0) {
-          targetSpaceIndex = newEmptySpaces[0].index;
-          console.log(`Created new space ${targetSpaceIndex} on display ${currentDisplay}`);
-        } else {
-          throw new Error("Failed to create or find empty space");
+        const current = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--space", String(target.index)], {
+          env: ENV,
+          encoding: "utf8",
+        });
+        const revalidated = parseYabaiSpace(outputString(current.stdout));
+        if (revalidated.index !== target.index || revalidated.windows.length > 0) {
+          createdSpace = await createSpaceOnDisplay(window.display);
+          target = createdSpace;
         }
       }
 
-      // Step 3: Move the window to the target space
-      const moveResult = await execFilePromise(
-        YABAI,
-        ["-m", "window", windowId.toString(), "--space", targetSpaceIndex.toString()],
-        { env: ENV },
-      );
-
-      if (moveResult.stderr?.trim()) {
-        console.error(`Error moving window ${windowId}: ${moveResult.stderr.trim()}`);
-        await showFailureToast(new Error(moveResult.stderr.trim()), { title: "Yabai Error - Move Window to Space" });
-        return;
-      }
-
-      // Step 4: Focus the target space
-      await execFilePromise(YABAI, ["-m", "space", "--focus", targetSpaceIndex.toString()], { env: ENV });
-
-      // Step 5: Focus the window
-      await execFilePromise(YABAI, ["-m", "window", "--focus", "first"], { env: ENV });
-
-      console.log(`Successfully moved window ${windowId} to space ${targetSpaceIndex} on display ${currentDisplay}`);
-
+      await queryExpectedWindow(window as YabaiWindow);
+      const move = await execFilePromise(YABAI, ["-m", "window", String(windowId), "--space", String(target.index)], {
+        env: ENV,
+        encoding: "utf8",
+      });
+      if (move.stderr.trim()) throw new Error(move.stderr.trim());
+      await execFilePromise(YABAI, ["-m", "space", "--focus", String(target.index)], {
+        env: ENV,
+        encoding: "utf8",
+      });
+      await execFilePromise(YABAI, ["-m", "window", String(windowId), "--focus"], {
+        env: ENV,
+        encoding: "utf8",
+      });
       await showToast({
         style: Toast.Style.Success,
         title: "Window Moved to Display Space",
-        message: `${windowApp} has been moved to ${
-          emptySpacesOnDisplay.length > 0 ? "an empty" : "a new"
-        } space on the current display and focused.`,
+        message: `${windowApp} moved to ${createdSpace ? "new" : "empty"} space ${target.index} on Display ${window.display}`,
       });
     } catch (error: unknown) {
       console.error("Move to display space failed:", error);
@@ -701,7 +608,7 @@ export function getApplicationPath(appName: string, applications: Application[])
 export async function launchApplicationByName(appName: string): Promise<void> {
   try {
     // First try using the app name directly
-    await execPromise(`open -a "${appName}"`, { env: ENV });
+    await execFilePromise("/usr/bin/open", ["-a", appName], { env: ENV, encoding: "utf8" });
     console.log(`Successfully launched ${appName} using open -a`);
   } catch (error) {
     console.error(`Failed to launch ${appName} with open -a:`, error);
@@ -714,7 +621,7 @@ export async function launchApplicationByName(appName: string): Promise<void> {
  */
 export async function launchApplicationByPath(appPath: string): Promise<void> {
   try {
-    await execPromise(`open "${appPath}"`, { env: ENV });
+    await execFilePromise("/usr/bin/open", [appPath], { env: ENV, encoding: "utf8" });
     console.log(`Successfully launched app at ${appPath}`);
   } catch (error) {
     console.error(`Failed to launch app at ${appPath}:`, error);
@@ -727,11 +634,9 @@ export async function launchApplicationByPath(appPath: string): Promise<void> {
  */
 export async function focusApplicationWithAppleScript(appName: string): Promise<void> {
   try {
-    const script = `tell application "${appName}" to activate`;
-    await execPromise(`osascript -e '${script}'`, { env: ENV });
-    console.log(`Successfully focused ${appName} using AppleScript`);
+    await execFilePromise("/usr/bin/open", ["-a", appName], { env: ENV, encoding: "utf8" });
   } catch (error) {
-    console.error(`Failed to focus ${appName} with AppleScript:`, error);
+    console.error(`Failed to activate ${appName}:`, error);
     throw error;
   }
 }
@@ -795,7 +700,7 @@ export async function getAvailableDisplays(): Promise<DisplayInfo[]> {
       throw new Error(stderr.trim());
     }
 
-    const displays = parseExecOutput<YabaiDisplay[]>(stdout);
+    const displays = parseYabaiDisplays(outputString(stdout));
 
     return displays.map((display) => ({
       index: display.index,
@@ -815,7 +720,12 @@ export async function getAvailableDisplays(): Promise<DisplayInfo[]> {
  * @param windowApp - The name of the application (for notifications)
  * @param displayIndex - The target display index
  */
-export const handleInteractiveMoveToDisplay = (windowId: number, windowApp: string, displayIndex: number) => {
+export const handleInteractiveMoveToDisplay = (
+  windowId: number,
+  windowApp: string,
+  expectedTitle: string,
+  displayIndex: number,
+) => {
   return async () => {
     await showToast({
       style: Toast.Style.Animated,
@@ -823,7 +733,9 @@ export const handleInteractiveMoveToDisplay = (windowId: number, windowApp: stri
     });
 
     try {
-      // Move the window to the specified display
+      const liveWindow = await queryExpectedWindow({ id: windowId, app: windowApp, title: expectedTitle });
+      if (liveWindow.display === displayIndex) return;
+
       const { stderr } = await execFilePromise(
         YABAI,
         ["-m", "window", windowId.toString(), "--display", displayIndex.toString()],
@@ -873,7 +785,7 @@ export async function getFocusedDisplay(): Promise<number> {
       throw new Error(stderr.trim());
     }
 
-    const display = parseExecOutput<YabaiDisplay>(stdout);
+    const display = parseYabaiDisplay(outputString(stdout));
 
     return display.index;
   } catch (error: unknown) {
@@ -897,7 +809,7 @@ export async function getFocusedSpace(): Promise<number> {
       throw new Error(stderr.trim());
     }
 
-    const space = parseExecOutput<YabaiSpace>(stdout);
+    const space = parseYabaiSpace(outputString(stdout));
 
     return space.index;
   } catch (error: unknown) {
@@ -911,8 +823,7 @@ export async function getFocusedSpace(): Promise<number> {
  * @param windowId - The ID of the window to move
  * @param windowApp - The name of the application (for notifications)
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) => {
+export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string, expectedTitle: string) => {
   return async () => {
     await showToast({
       style: Toast.Style.Animated,
@@ -923,12 +834,8 @@ export const handleMoveToFocusedDisplay = (windowId: number, windowApp: string) 
       // Get the currently focused space (not just display)
       const focusedSpaceIndex = await getFocusedSpace();
 
-      // Get the current window info to check if THIS SPECIFIC WINDOW is already on the focused space
-      const windowResult = await execFilePromise(YABAI, ["-m", "query", "--windows", "--window", windowId.toString()], {
-        env: ENV,
-      });
-
-      const windowInfo = parseExecOutput<YabaiWindow>(windowResult.stdout);
+      // Revalidate the selected window immediately before the move.
+      const windowInfo = await queryExpectedWindow({ id: windowId, app: windowApp, title: expectedTitle });
 
       // Check if THIS SPECIFIC WINDOW is already on the focused space
       if (windowInfo.space === focusedSpaceIndex) {
@@ -994,40 +901,15 @@ export const handleCreateSpace = () => {
       const displayResult = await execFilePromise(YABAI, ["-m", "query", "--displays", "--display"], {
         env: ENV,
       });
-      const currentDisplay = parseExecOutput<YabaiDisplay>(displayResult.stdout);
+      const currentDisplay = parseYabaiDisplay(outputString(displayResult.stdout));
 
-      // Create a new space
-      const { stderr } = await execFilePromise(YABAI, ["-m", "space", "--create"], { env: ENV });
-
-      if (stderr?.trim()) {
-        console.error(`Error creating space: ${stderr.trim()}`);
-        await showFailureToast(new Error(stderr.trim()), { title: "Failed to Create Space" });
-        return;
-      }
-
-      // Query spaces to get the newly created space
-      const spacesResult = await execFilePromise(YABAI, ["-m", "query", "--spaces"], { env: ENV });
-      const allSpaces = parseExecOutput<YabaiSpace[]>(spacesResult.stdout);
-
-      // Find the newly created space on the current display
-      const spacesOnDisplay = allSpaces.filter((space) => space.display === currentDisplay.index);
-      const newSpace = spacesOnDisplay.sort((a, b) => b.index - a.index)[0];
-
-      if (newSpace) {
-        console.log(`Created new space ${newSpace.index} on display ${currentDisplay.index}`);
-        await showToast({
-          style: Toast.Style.Success,
-          title: "Space Created",
-          message: `New space ${newSpace.index} created on Display ${currentDisplay.index}`,
-        });
-      } else {
-        console.log(`Space created on display ${currentDisplay.index}`);
-        await showToast({
-          style: Toast.Style.Success,
-          title: "Space Created",
-          message: `New space created on Display ${currentDisplay.index}`,
-        });
-      }
+      const newSpace = await createSpaceOnDisplay(currentDisplay.index);
+      console.log(`Created new space ${newSpace.index} on display ${currentDisplay.index}`);
+      await showToast({
+        style: Toast.Style.Success,
+        title: "Space Created",
+        message: `New space ${newSpace.index} created on Display ${currentDisplay.index}`,
+      });
     } catch (error: unknown) {
       console.error("Create space failed:", error);
       await showFailureToast(error, { title: "Failed to Create Space" });
@@ -1035,104 +917,36 @@ export const handleCreateSpace = () => {
   };
 };
 
-/**
- * Destroy (delete) the currently focused space
- */
-export const handleDestroySpace = () => {
-  return async () => {
-    await showToast({
-      style: Toast.Style.Animated,
-      title: "Destroying Space...",
-    });
+async function focusAdjacentSpace(direction: "next" | "previous"): Promise<void> {
+  const currentResult = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--space"], {
+    env: ENV,
+    encoding: "utf8",
+  });
+  const current = parseYabaiSpace(outputString(currentResult.stdout));
+  const spaces = await querySpacesOnDisplay(current.display);
+  const target = getAdjacentSpace(spaces, current.index, current.display, direction);
+  if (target === undefined || target === current.index) return;
+  await execFilePromise(YABAI, ["-m", "space", "--focus", String(target)], { env: ENV, encoding: "utf8" });
+}
 
-    try {
-      // Get the currently focused space
-      const spaceResult = await execFilePromise(YABAI, ["-m", "query", "--spaces", "--space"], {
-        env: ENV,
-      });
-      const currentSpace = parseExecOutput<YabaiSpace>(spaceResult.stdout);
-
-      // Check if the space has windows
-      if (currentSpace.windows && currentSpace.windows.length > 0) {
-        await showFailureToast(
-          new Error(
-            `Space ${currentSpace.index} has ${currentSpace.windows.length} window(s). Close or move them first.`,
-          ),
-          { title: "Cannot Destroy Space" },
-        );
-        return;
-      }
-
-      const spaceIndex = currentSpace.index;
-
-      // Destroy the space
-      const { stderr } = await execFilePromise(YABAI, ["-m", "space", "--destroy"], { env: ENV });
-
-      if (stderr?.trim()) {
-        console.error(`Error destroying space ${spaceIndex}: ${stderr.trim()}`);
-        await showFailureToast(new Error(stderr.trim()), { title: "Failed to Destroy Space" });
-        return;
-      }
-
-      console.log(`Successfully destroyed space ${spaceIndex}`);
-      await showToast({
-        style: Toast.Style.Success,
-        title: "Space Destroyed",
-        message: `Space ${spaceIndex} has been removed`,
-      });
-    } catch (error: unknown) {
-      console.error("Destroy space failed:", error);
-      await showFailureToast(error, { title: "Failed to Destroy Space" });
-    }
-  };
-};
-
-/**
- * Focus next space (with wraparound)
- */
+/** Focus the next space on the current display, with local wraparound. */
 export const handleFocusNextSpace = () => {
   return async () => {
     try {
-      // Try to focus next space
-      const { stderr } = await execFilePromise(YABAI, ["-m", "space", "--focus", "next"], { env: ENV });
-
-      // If next space doesn't exist, wrap to first space
-      if (stderr?.trim()) {
-        await execFilePromise(YABAI, ["-m", "space", "--focus", "first"], { env: ENV });
-      }
+      await focusAdjacentSpace("next");
     } catch (error: unknown) {
-      console.error("Focus next space failed:", error);
-      // Try to focus first space as fallback
-      try {
-        await execFilePromise(YABAI, ["-m", "space", "--focus", "first"], { env: ENV });
-      } catch (fallbackError) {
-        console.error("Fallback to first space also failed:", fallbackError);
-      }
+      await showFailureToast(error, { title: "Focus Next Space Failed" });
     }
   };
 };
 
-/**
- * Focus previous space (with wraparound)
- */
+/** Focus the previous space on the current display, with local wraparound. */
 export const handleFocusPreviousSpace = () => {
   return async () => {
     try {
-      // Try to focus previous space
-      const { stderr } = await execFilePromise(YABAI, ["-m", "space", "--focus", "prev"], { env: ENV });
-
-      // If previous space doesn't exist, wrap to last space
-      if (stderr?.trim()) {
-        await execFilePromise(YABAI, ["-m", "space", "--focus", "last"], { env: ENV });
-      }
+      await focusAdjacentSpace("previous");
     } catch (error: unknown) {
-      console.error("Focus previous space failed:", error);
-      // Try to focus last space as fallback
-      try {
-        await execFilePromise(YABAI, ["-m", "space", "--focus", "last"], { env: ENV });
-      } catch (fallbackError) {
-        console.error("Fallback to last space also failed:", fallbackError);
-      }
+      await showFailureToast(error, { title: "Focus Previous Space Failed" });
     }
   };
 };
@@ -1192,35 +1006,12 @@ export const handleCloseBrowserTab = (tab: BrowserTab, onClosed?: () => void) =>
     });
 
     try {
-      // AppleScript to close a specific tab
-      let script: string;
-
-      if (tab.browser === "Safari") {
-        script = `
-          tell application "Safari"
-            close tab ${tab.tabIndex} of window ${tab.windowIndex}
-          end tell
-        `;
-      } else {
-        // Chromium-based browsers
-        script = `
-          tell application "${tab.browser}"
-            close tab ${tab.tabIndex} of window ${tab.windowIndex}
-          end tell
-        `;
-      }
-
-      await execPromise(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { env: ENV });
-
-      // Invalidate cache since tab list changed
-      browserTabManager.invalidateCache();
-
+      await browserTabManager.closeTab(tab);
       await showToast({
         style: Toast.Style.Success,
         title: "Tab Closed",
         message: tab.title.slice(0, 40),
       });
-
       onClosed?.();
     } catch (error: unknown) {
       console.error("Close browser tab failed:", error);

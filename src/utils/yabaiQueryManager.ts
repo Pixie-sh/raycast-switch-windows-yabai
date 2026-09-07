@@ -1,103 +1,97 @@
-/**
- * Yabai Query Manager to consolidate and cache yabai command executions
- * Prevents redundant processes and provides a centralized data source
- */
-
-import { exec } from "child_process";
-import { promisify } from "util";
+/** Consolidated, bounded yabai queries with short-lived caching. */
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { YabaiWindow, YabaiSpace, YabaiDisplay, ENV, YABAI } from "../models";
+import { EXEC_FILE_OPTIONS } from "./command";
 import { performanceMonitor } from "./performanceMonitor";
-import { IncompleteJsonError, safeJsonParse } from "./json";
+import { parseYabaiDisplays, parseYabaiSpaces, parseYabaiWindows } from "./runtimeData";
+import { TrailingQueryGate } from "./trailingQuery";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 interface QueryCache<T> {
   data: T | null;
   timestamp: number;
-  inFlight: Promise<T> | null;
+  gate: TrailingQueryGate;
 }
 
-class YabaiQueryManager {
+type QueryType = "windows" | "spaces" | "displays";
+
+export class YabaiQueryManager {
   private cache = {
-    windows: { data: null, timestamp: 0, inFlight: null } as QueryCache<YabaiWindow[]>,
-    spaces: { data: null, timestamp: 0, inFlight: null } as QueryCache<YabaiSpace[]>,
-    displays: { data: null, timestamp: 0, inFlight: null } as QueryCache<YabaiDisplay[]>,
+    windows: { data: null, timestamp: 0, gate: new TrailingQueryGate() } as QueryCache<YabaiWindow[]>,
+    spaces: { data: null, timestamp: 0, gate: new TrailingQueryGate() } as QueryCache<YabaiSpace[]>,
+    displays: { data: null, timestamp: 0, gate: new TrailingQueryGate() } as QueryCache<YabaiDisplay[]>,
   };
 
-  private readonly CACHE_TTL_MS = 2000; // 2 seconds
+  private readonly CACHE_TTL_MS = 2_000;
+  private readonly MAX_STALE_AGE_MS = 30_000;
 
   async queryWindows(): Promise<YabaiWindow[]> {
-    return this.performQuery("windows", "-m query --windows");
+    return this.performQuery("windows", ["-m", "query", "--windows"]);
   }
 
   async querySpaces(): Promise<YabaiSpace[]> {
-    return this.performQuery("spaces", "-m query --spaces");
+    return this.performQuery("spaces", ["-m", "query", "--spaces"]);
   }
 
   async queryDisplays(): Promise<YabaiDisplay[]> {
-    return this.performQuery("displays", "-m query --displays");
+    return this.performQuery("displays", ["-m", "query", "--displays"]);
   }
 
-  private async performQuery<T>(type: keyof typeof this.cache, command: string): Promise<T> {
-    const cacheEntry = this.cache[type];
+  private parse(type: QueryType, stdout: string): YabaiWindow[] | YabaiSpace[] | YabaiDisplay[] {
+    if (type === "windows") return parseYabaiWindows(stdout) as YabaiWindow[];
+    if (type === "spaces") return parseYabaiSpaces(stdout) as YabaiSpace[];
+    return parseYabaiDisplays(stdout) as YabaiDisplay[];
+  }
 
-    if (cacheEntry.inFlight) {
-      return cacheEntry.inFlight as Promise<T>;
-    }
-
+  private async performQuery<T>(type: QueryType, args: string[]): Promise<T> {
+    const cacheEntry = this.cache[type] as QueryCache<unknown>;
     const now = Date.now();
-    if (cacheEntry.data && now - cacheEntry.timestamp < this.CACHE_TTL_MS) {
+    if (cacheEntry.data !== null && now - cacheEntry.timestamp < this.CACHE_TTL_MS) {
       performanceMonitor.recordMetric(`${type}-query-cache-hit`, 0);
       return cacheEntry.data as T;
     }
 
-    const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
-
-    const promise = performanceMonitor.measureAsync(`${type}-query`, async () => {
-      let attempts = 0;
-      const maxAttempts = 2; // initial + one retry for incomplete output
-      while (attempts < maxAttempts) {
-        attempts++;
-        try {
-          const { stdout } = await execAsync(`${YABAI} ${command}`, { env: ENV, maxBuffer: 10 * 1024 * 1024 });
-          const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
-          const parsed = safeJsonParse<T>(stdoutStr);
-          cacheEntry.data = parsed as unknown as T;
-          cacheEntry.timestamp = Date.now();
-          return parsed;
-        } catch (error) {
-          if (error instanceof IncompleteJsonError && attempts < maxAttempts) {
-            // Short backoff and retry once
-            await sleep(60);
-            continue;
+    return cacheEntry.gate.run((generation) =>
+      performanceMonitor.measureAsync(`${type}-query`, async () => {
+        let lastError: unknown;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const { stdout } = await execFileAsync(YABAI, args, {
+              ...EXEC_FILE_OPTIONS,
+              env: ENV,
+              encoding: "utf8",
+            });
+            const parsed = this.parse(type, stdout);
+            if (cacheEntry.gate.isCurrent(generation)) {
+              cacheEntry.data = parsed;
+              cacheEntry.timestamp = Date.now();
+            }
+            return parsed as T;
+          } catch (error) {
+            lastError = error;
+            if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 60));
           }
-          console.error(`Error querying ${type}:`, error);
-          // Return stale data on error if available
-          if (cacheEntry.data) {
-            return cacheEntry.data as T;
-          }
-          throw error;
-        } finally {
-          // inFlight reset handled after loop
         }
-      }
-      // Should not reach here; fallback to cached or throw
-      if (cacheEntry.data) return cacheEntry.data as T;
-      throw new Error(`Failed to query ${type}`);
-    });
-
-    cacheEntry.inFlight = promise as Promise<unknown>;
-    const result = await promise;
-    cacheEntry.inFlight = null;
-    return result;
+        if (cacheEntry.data !== null && Date.now() - cacheEntry.timestamp <= this.MAX_STALE_AGE_MS) {
+          return cacheEntry.data as T;
+        }
+        throw lastError instanceof Error ? lastError : new Error(`Failed to query ${type}`);
+      }),
+    ) as Promise<T>;
   }
 
-  invalidateCache(type?: keyof typeof this.cache): void {
+  invalidateCache(type?: QueryType): void {
     if (type) {
       this.cache[type].timestamp = 0;
-    } else {
-      Object.values(this.cache).forEach((entry) => (entry.timestamp = 0));
+      this.cache[type].gate.invalidate();
+      return;
     }
+    Object.values(this.cache).forEach((entry) => {
+      entry.timestamp = 0;
+      entry.gate.invalidate();
+    });
   }
 }
 

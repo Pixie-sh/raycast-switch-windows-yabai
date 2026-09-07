@@ -10,13 +10,10 @@ import {
   List,
   LocalStorage,
 } from "@raycast/api";
-import { getFavicon, useLocalStorage } from "@raycast/utils";
+import { getFavicon, showFailureToast, useLocalStorage } from "@raycast/utils";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Application, BrowserTab, BrowserType, SortMethod, YabaiWindow } from "./models";
 import {
-  handleAggregateToSpace,
-  handleCloseEmptySpaces,
-  handleCloseWindow,
   handleFocusWindow,
   handleOpenWindowInNewSpace,
   handleFocusBrowserTab,
@@ -25,8 +22,6 @@ import {
   launchApplicationByName,
 } from "./handlers";
 import {
-  DisperseOnDisplayActions,
-  MoveToDisplaySpace,
   MoveWindowToDisplayActions,
   InteractiveMoveToDisplayAction,
   MoveToFocusedDisplayAction,
@@ -40,7 +35,31 @@ import { browserTabManager } from "./utils/browserTabManager";
 import { focusHistoryManager, getMergedFocusTimes } from "./utils/focusHistoryManager";
 import { parseDisplayFilter } from "./utils/displayFilter";
 import { getDefaultSelectedItemId, searchItems } from "./utils/searchUtils";
+import { canCloseBrowserTab } from "./utils/browserTabData";
+import { parseCachedWindows } from "./utils/runtimeData";
+import {
+  advanceFocusState,
+  FocusState,
+  getCycledIndex,
+  getCycleOriginForSelection,
+  getWindowSetKey,
+  hydrateWindowState,
+  makeFocusReference,
+  migrateFocusState,
+  recordWindowUsage,
+  resolveCountdownTarget,
+  resolveFocusReference,
+  resolveVisibleSelection,
+  serializeFocusState,
+  serializeUsageStorage,
+  shouldSyncFocusHistory,
+  sortWindows as sortWindowsByMethod,
+  UsageEntry,
+} from "./utils/windowState";
 import type { SearchField } from "./utils/searchUtils";
+import { runBestEffort } from "./utils/bestEffort";
+import { shouldShowWebFallbackForScope } from "./utils/searchScope";
+import { LoadingActivityCounter } from "./utils/trailingQuery";
 
 /**
  * Parse tab search prefix from search text
@@ -95,6 +114,7 @@ const TAB_SEARCH_FIELDS: SearchField<BrowserTab>[] = [
 
 const SEARCH_WEB_ITEM_ID = "search-web";
 const CALC_RESULT_ITEM_ID = "calc-result";
+const CACHED_WINDOWS_MAX_AGE_MS = 10_000;
 
 function getWindowItemId(windowId: number): string {
   return `window-${windowId}`;
@@ -141,23 +161,22 @@ function getAvailableDisplayNumbers(windows: YabaiWindow[]): number[] {
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export default function Command(_props: { launchContext?: { launchType: LaunchType } }) {
-  const [usageTimes, setUsageTimes] = useState<Record<string, number>>({});
+  const [usageTimes, setUsageTimes] = useState<Record<string, UsageEntry>>({});
   const [inputText, setInputText] = useState("");
   const searchText = useDebounce(inputText, 30); // Reduced debounce delay for better responsiveness
   const tabFilter = useMemo(() => parseTabFilter(searchText), [searchText]);
   const displayFilter = useMemo(() => parseDisplayFilter(searchText), [searchText]);
   const calcMode = useMemo(() => parseCalcMode(searchText), [searchText]);
-  const calcResult = useMemo(
-    () => (calcMode.isCalcMode ? evaluateExpression(calcMode.expression) : null),
-    [calcMode],
-  );
+  const calcResult = useMemo(() => (calcMode.isCalcMode ? evaluateExpression(calcMode.expression) : null), [calcMode]);
   const hasActiveSearch = searchText.trim().length > 0;
   const [windows, setWindows] = useState<YabaiWindow[]>([]);
+  const [hasFreshWindowData, setHasFreshWindowData] = useState(false);
   const [applications, setApplications] = useState<Application[]>([]);
-  // sortMethod is persisted; its read value is not currently used in sort logic
-  // (sorting always uses focus timestamps). Only setSortMethod is needed to respond to
-  // the "Sort by" actions in WindowActions.
-  const { setValue: setSortMethod } = useLocalStorage<SortMethod>("sortMethod", SortMethod.RECENTLY_USED);
+  const { value: storedSortMethod, setValue: setSortMethod } = useLocalStorage<SortMethod>(
+    "sortMethod",
+    SortMethod.RECENTLY_USED,
+  );
+  const sortMethod = storedSortMethod ?? SortMethod.RECENTLY_USED;
   const { value: _isShowingDetail, setValue: setIsShowingDetail } = useLocalStorage<boolean>("isShowingDetail", false);
   const isShowingDetail = _isShowingDetail ?? false;
   const [scopeFilter, setScopeFilter] = useState<"all" | "windows" | "applications" | "tabs">("all");
@@ -172,30 +191,29 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
 
-  // Focus history to track current and previous focused windows.
-  // Stores both window ID and app name: ID is used within the same yabai session
-  // (stable IDs), app name is the cross-session fallback (IDs reset on reboot/restart).
-  const [focusHistory, setFocusHistory] = useState<{
-    current: number | null;
-    currentApp: string | null;
-    previous: number | null;
-    previousApp: string | null;
-  }>({ current: null, currentApp: null, previous: null, previousApp: null });
+  const [focusHistory, setFocusHistory] = useState<FocusState>({ current: null, previous: null });
+  const storageWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const enqueueStorageWrite = useCallback((operation: () => Promise<void>): Promise<void> => {
+    const next = storageWriteQueueRef.current.then(operation, operation);
+    storageWriteQueueRef.current = next;
+    return next;
+  }, []);
 
   // Browser tabs state
   const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([]);
   const [isLoadingTabs, setIsLoadingTabs] = useState(false);
   const tabsLoadedRef = useRef(false);
+  const tabLoadingCounterRef = useRef(new LoadingActivityCounter());
+  const beginTabLoading = useCallback(() => setIsLoadingTabs(tabLoadingCounterRef.current.begin()), []);
+  const endTabLoading = useCallback(() => setIsLoadingTabs(tabLoadingCounterRef.current.end()), []);
 
   // Focus tracking state - merges extension usage with yabai focus history
   const [mergedFocusTimes, setMergedFocusTimes] = useState<Record<number, number>>({});
   const [isFocusTrackingSetup, setIsFocusTrackingSetup] = useState<boolean | null>(null);
   const [isMergedFocusTimesReady, setIsMergedFocusTimesReady] = useState(false);
-  // True once focusHistory has been loaded from LocalStorage on mount.
-  // Used to gate the spinner: we must not show the sorted list until we know
-  // previousApp, otherwise sortedWindows step 2 runs with null and puts the
-  // wrong window at position 1.
+  // Gate sorting until persisted focus references are hydrated.
   const [isFocusHistoryLoaded, setIsFocusHistoryLoaded] = useState(false);
+  const isFocusHistoryLoadedRef = useRef(false);
 
   // Auto-select countdown state — mimics Cmd+Tab release behavior.
   // Uses exponential backoff: quick switch (1 Tab) is fast, more cycling = more thinking time.
@@ -210,81 +228,70 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   // Tab-cycling state — controlled via Tab / Shift+Tab actions within the open extension.
   // Starts at index 0 (first item highlighted). Cycling starts the auto-select countdown.
   const [cycleIndex, setCycleIndex] = useState(0);
+  const cycleIndexRef = useRef(0);
+  const [userSelectedItemId, setUserSelectedItemId] = useState<string>();
+  const selectedItemIdRef = useRef<string | undefined>(undefined);
   // Total Tab presses (never wraps). Used for exponential backoff so it doesn't
   // reset when cycleIndex wraps back to 0.
   const totalTabPressesRef = useRef(0);
 
-  // Refs to track lazy loading state
+  const focusHistoryCurrentRef = useRef(focusHistory.current);
 
-  // Ref that always holds the latest focusHistory.current value.
-  // Used inside refreshWindows so we can read it without putting focusHistory.current
-  // in the useCallback dep array (which would recreate refreshWindows/refreshAllData
-  // and re-trigger the "Initial refresh" effect on every focus change).
-  const focusHistoryCurrentRef = useRef<number | null>(null);
-
-  // Keep the ref in sync whenever focusHistory.current changes.
   useEffect(() => {
     focusHistoryCurrentRef.current = focusHistory.current;
   }, [focusHistory.current]);
 
-  // Function to remove a window from the local listing after it's closed.
-  const removeWindow = useCallback((id: number) => {
-    setWindows((prevWindows) => prevWindows.filter((w) => w.id !== id));
-  }, []);
-
   const updateFocusHistory = useCallback((windowsData: YabaiWindow[]) => {
-    const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
-    const currentFocusedId = currentlyFocused?.id || null;
-    const currentFocusedApp = currentlyFocused?.app || null;
-
-    setFocusHistory((prevHistory) => {
-      if (currentFocusedId !== prevHistory.current) {
-        // Only promote current→previous when we have a known current window.
-        // If prevHistory.current is null (e.g. first update before LocalStorage loaded),
-        // keep the persisted previous/previousApp so the cross-session fallback survives.
-        const newPrevious = prevHistory.current !== null ? prevHistory.current : prevHistory.previous;
-        const newPreviousApp = prevHistory.current !== null ? prevHistory.currentApp : prevHistory.previousApp;
-        return {
-          current: currentFocusedId,
-          currentApp: currentFocusedApp,
-          previous: newPrevious,
-          previousApp: newPreviousApp,
-        };
+    const focusedWindow = windowsData.find((window) => window["has-focus"] === true);
+    const nextReference = focusedWindow ? makeFocusReference(focusedWindow) : null;
+    setFocusHistory((previousState) => {
+      const migratedState = migrateFocusState(previousState, windowsData);
+      if (
+        nextReference?.id === migratedState.current?.id &&
+        nextReference?.fingerprint === migratedState.current?.fingerprint
+      ) {
+        return migratedState;
       }
-      return prevHistory;
+      const validCurrent = resolveFocusReference(migratedState.current, windowsData);
+      return {
+        current: nextReference,
+        previous: validCurrent ? makeFocusReference(validCurrent) : migratedState.previous,
+      };
     });
   }, []);
 
-  // Use a ref to prevent simultaneous refreshes without causing dependency issues
-  const isRefreshingRef = useRef(false);
+  const refreshActivityCountRef = useRef(0);
+  const beginRefreshActivity = useCallback(() => {
+    refreshActivityCountRef.current += 1;
+    setIsRefreshing(true);
+  }, []);
+  const endRefreshActivity = useCallback(() => {
+    refreshActivityCountRef.current = Math.max(0, refreshActivityCountRef.current - 1);
+    setIsRefreshing(refreshActivityCountRef.current > 0);
+  }, []);
 
   // Function to refresh windows data with focus change detection
 
   const refreshWindows = useCallback(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     async (_forceFull = false) => {
-      // Don't refresh if already refreshing
-      if (isRefreshingRef.current) return;
-
-      isRefreshingRef.current = true;
-      setIsRefreshing(true);
+      beginRefreshActivity();
       try {
         try {
           const windowsData = await yabaiQueryManager.queryWindows();
-          // Check if focus has changed
           const currentlyFocused = windowsData.find((win) => win["has-focus"] === true);
-          const newFocusedId = currentlyFocused?.id || null;
-          const previousFocusedId = focusHistoryCurrentRef.current;
+          const newFocusedReference = currentlyFocused ? makeFocusReference(currentlyFocused) : null;
+          const previousFocusedReference = focusHistoryCurrentRef.current;
 
-          // Always update the windows data to keep the list current
           setWindows(windowsData);
+          setHasFreshWindowData(true);
 
-          // Update focus history if changed
-          if (newFocusedId !== previousFocusedId) {
+          if (
+            isFocusHistoryLoadedRef.current &&
+            (newFocusedReference?.id !== previousFocusedReference?.id ||
+              newFocusedReference?.fingerprint !== previousFocusedReference?.fingerprint)
+          ) {
             updateFocusHistory(windowsData);
-            if (previousFocusedId !== null || newFocusedId !== null) {
-              console.log(`Focus changed from window ${previousFocusedId} to ${newFocusedId}`);
-            }
           }
 
           // Update cache with timestamp
@@ -292,7 +299,10 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
             windows: windowsData,
             timestamp: Date.now(),
           };
-          await LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData));
+          await runBestEffort(
+            () => LocalStorage.setItem("cachedWindows", JSON.stringify(cacheData)),
+            (error) => console.warn("Could not persist window cache:", error),
+          );
           setLastRefreshTime(Date.now());
         } catch (parseError) {
           if (parseError instanceof IncompleteJsonError) {
@@ -305,183 +315,92 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       } catch (error) {
         console.error("Error refreshing windows:", error);
       } finally {
-        setIsRefreshing(false);
-        isRefreshingRef.current = false;
+        endRefreshActivity();
       }
     },
-    [updateFocusHistory],
+    [beginRefreshActivity, endRefreshActivity, updateFocusHistory],
   );
 
-  // Function to refresh all data (windows only)
+  const refreshApplications = useCallback(async () => {
+    const apps = await getApplications();
+    setApplications(apps.map((app) => ({ name: app.name, path: app.path })));
+  }, []);
+
   const refreshAllData = useCallback(
     async (forceFull = true) => {
-      setIsRefreshing(true);
+      beginRefreshActivity();
       try {
-        await refreshWindows(forceFull);
+        if (forceFull) yabaiQueryManager.invalidateCache();
+        await Promise.all([refreshWindows(forceFull), refreshApplications()]);
       } finally {
-        setIsRefreshing(false);
+        endRefreshActivity();
       }
     },
-    [refreshWindows],
+    [beginRefreshActivity, endRefreshActivity, refreshApplications, refreshWindows],
   );
 
-  // Load previous usage times and focus history from local storage when the component mounts.
   useEffect(() => {
-    (async () => {
-      const storedTimes = await LocalStorage.getItem<string>("usageTimes");
-      if (storedTimes) {
-        try {
-          setUsageTimes(JSON.parse(storedTimes));
-        } catch (e) {
-          console.error("error setting stored times;", e);
-        }
-      }
-
-      const storedFocusHistory = await LocalStorage.getItem<string>("focusHistory");
-      if (storedFocusHistory) {
-        try {
-          const parsedFocusHistory = JSON.parse(storedFocusHistory);
-          setFocusHistory(parsedFocusHistory);
-        } catch (e) {
-          console.error("error setting stored focus history;", e);
-        }
-      }
-
-      // Mark focus history as loaded regardless of whether storage had a value.
-      // The spinner stays on until this is true, ensuring sortedWindows step 2
-      // runs with the correct previousApp before the list is shown.
+    void (async () => {
+      const hydrated = await hydrateWindowState((key) => LocalStorage.getItem<string>(key));
+      setUsageTimes(hydrated.usageTimes);
+      setFocusHistory(hydrated.focusHistory);
+      focusHistoryCurrentRef.current = hydrated.focusHistory.current;
+      if (hydrated.error) console.error("Failed to hydrate focus state:", hydrated.error);
+      isFocusHistoryLoadedRef.current = true;
       setIsFocusHistoryLoaded(true);
     })();
   }, []);
 
-  // Persist usage times in local storage when they change (debounced to reduce I/O)
   useEffect(() => {
-    const timeoutId = setTimeout(() => {
-      LocalStorage.setItem("usageTimes", JSON.stringify(usageTimes));
-    }, 500); // Debounce for 500ms
+    if (!shouldSyncFocusHistory(isFocusHistoryLoaded, hasFreshWindowData)) return;
+    updateFocusHistory(windows);
+  }, [hasFreshWindowData, isFocusHistoryLoaded, updateFocusHistory, windows]);
 
-    return () => clearTimeout(timeoutId);
-  }, [usageTimes]);
-
-  // Persist focus history in local storage when it changes (debounced to reduce I/O)
   useEffect(() => {
-    const timeoutId = setTimeout(() => {
-      LocalStorage.setItem("focusHistory", JSON.stringify(focusHistory));
-    }, 500); // Debounce for 500ms
+    if (!isFocusHistoryLoaded) return;
+    void runBestEffort(
+      () => enqueueStorageWrite(() => LocalStorage.setItem("usageTimes", serializeUsageStorage(usageTimes))),
+      (error) => console.warn("Could not persist usage history:", error),
+    );
+  }, [enqueueStorageWrite, isFocusHistoryLoaded, usageTimes]);
 
-    return () => clearTimeout(timeoutId);
-  }, [focusHistory]);
-
-  // Check if focus tracking is set up (yabai signal installed)
-  // Also invalidate cache on mount to get fresh focus history from yabai log
   useEffect(() => {
-    // Invalidate cache to ensure we read fresh data from yabai log
+    if (!isFocusHistoryLoaded) return;
+    void runBestEffort(
+      () => enqueueStorageWrite(() => LocalStorage.setItem("focusHistory", serializeFocusState(focusHistory))),
+      (error) => console.warn("Could not persist focus history:", error),
+    );
+  }, [enqueueStorageWrite, focusHistory, isFocusHistoryLoaded]);
+
+  useEffect(() => {
     focusHistoryManager.invalidateCache();
     focusHistoryManager.isSetupComplete().then(setIsFocusTrackingSetup);
   }, []);
 
-  // Merge extension usage times with yabai focus history for accurate sorting
-  // Re-runs when windows change OR when lastRefreshTime changes (indicating fresh window data)
+  const mergeGenerationRef = useRef(0);
   useEffect(() => {
-    if (windows.length === 0) return;
-
-    // Invalidate cache before merging to ensure we have latest yabai focus history
-    focusHistoryManager.invalidateCache();
-
-    const windowIds = windows.map((w) => w.id);
-    getMergedFocusTimes(usageTimes, windowIds).then((merged) => {
-      setMergedFocusTimes(merged);
+    if (!isFocusHistoryLoaded) return;
+    const generation = ++mergeGenerationRef.current;
+    if (windows.length === 0) {
+      setMergedFocusTimes({});
       setIsMergedFocusTimesReady(true);
-      console.log("Merged focus times ready:", JSON.stringify(merged));
-    });
-  }, [windows, usageTimes, lastRefreshTime]);
-
-  // Query windows using useExec - only for initial load
-  // Disable useExec for windows; rely on yabaiQueryManager instead
-
-  // Load cached windows on mount
-  useEffect(() => {
-    const loadCachedWindows = async () => {
-      const cachedData = await LocalStorage.getItem<string>("cachedWindows");
-      if (cachedData) {
-        try {
-          const { windows: cachedWindows, timestamp } = JSON.parse(cachedData);
-          if (Array.isArray(cachedWindows) && cachedWindows.length > 0) {
-            setWindows(cachedWindows);
-            // Do NOT call updateFocusHistory here: focusHistory hasn't been loaded from
-            // LocalStorage yet (the storage load effect is async and may not have settled),
-            // so updateFocusHistory would see prevHistory.current === null and wipe the
-            // persisted previous/previousApp. The real refreshWindows call (triggered by
-            // the mount effect) will call updateFocusHistory with fresh yabai data after
-            // storage has had time to load.
-            setLastRefreshTime(timestamp);
-            console.log("Loaded windows from cache, timestamp:", new Date(timestamp).toLocaleString());
-          }
-        } catch (error) {
-          console.error("Error parsing cached windows:", error);
-        }
-      }
-    };
-
-    loadCachedWindows();
-  }, []);
-
-  // Initial refresh when extension opens + eagerly load browser tabs
-  useEffect(() => {
-    let isMounted = true;
-
-    const initialize = async () => {
-      if (!isMounted) return;
-      console.log("Extension mounted, refreshing all data");
-
-      // 1. Show cached tabs instantly (from previous session's LocalStorage)
-      browserTabManager.loadCachedTabs().then((cached) => {
-        if (isMounted && cached && cached.length > 0) {
-          setBrowserTabs(cached);
-          tabsLoadedRef.current = true;
-          console.log(`Loaded ${cached.length} cached browser tabs instantly`);
-        }
-      });
-
-      // 2. Refresh tabs from browsers in background (no yabai dependency)
-      browserTabManager
-        .queryAllTabs()
-        .then((tabs) => {
-          if (isMounted && tabs.length > 0) {
-            setBrowserTabs(tabs);
-            tabsLoadedRef.current = true;
-            console.log(`Refreshed ${tabs.length} browser tabs from browsers`);
-          }
-        })
-        .catch(() => {});
-
-      // 3. Refresh windows from yabai
-      await refreshAllData(true);
-    };
-
-    initialize();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [refreshAllData]); // Include refreshAllData in dependencies
-
-  // No background polling - rely on manual refresh to avoid flickering
-
-  // Load applications on mount using native getApplications()
-  useEffect(() => {
-    let isMounted = true;
-    getApplications()
-      .then((apps) => {
-        if (isMounted) {
-          setApplications(apps.map((a) => ({ name: a.name, path: a.path })));
-        }
+      return;
+    }
+    setIsMergedFocusTimesReady(false);
+    focusHistoryManager.invalidateCache();
+    getMergedFocusTimes(usageTimes, windows)
+      .then((merged) => {
+        if (generation !== mergeGenerationRef.current) return;
+        setMergedFocusTimes(merged);
+        setIsMergedFocusTimesReady(true);
       })
-      .catch((error) => console.error("Error loading applications:", error));
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+      .catch((error) => {
+        if (generation !== mergeGenerationRef.current) return;
+        console.error("Failed to merge focus history:", error);
+        setMergedFocusTimes({});
+        setIsMergedFocusTimesReady(true);
+      });
+  }, [isFocusHistoryLoaded, lastRefreshTime, usageTimes, windows]);
 
   // Create a Fuse instance for fuzzy searching windows
   const fuse = useMemo(() => {
@@ -543,19 +462,76 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const loadBrowserTabs = useCallback(async () => {
     if (tabsLoadedRef.current) return;
 
-    setIsLoadingTabs(true);
+    beginTabLoading();
     tabsLoadedRef.current = true;
 
     try {
       const tabs = await browserTabManager.queryAllTabs();
       setBrowserTabs(tabs);
+      const warnings = browserTabManager.consumeWarnings();
+      if (warnings.length > 0) {
+        await showFailureToast(new Error(warnings.join("; ")), { title: "Some Browser Tabs Could Not Be Loaded" });
+      }
       console.log(`Loaded ${tabs.length} browser tabs`);
     } catch (error) {
+      tabsLoadedRef.current = false;
       console.error("Error loading browser tabs:", error);
+      await showFailureToast(error, { title: "Browser Tab Refresh Failed" });
     } finally {
-      setIsLoadingTabs(false);
+      endTabLoading();
     }
-  }, []);
+  }, [beginTabLoading, endTabLoading]);
+
+  // Cache hydration is completed before live queries begin, so stale reads can
+  // never overwrite fresher results that have already reached the UI.
+  useEffect(() => {
+    let isMounted = true;
+
+    void (async () => {
+      console.log("Extension mounted, hydrating caches before live refresh");
+      try {
+        const [cachedWindowsRaw, cachedTabs] = await Promise.all([
+          LocalStorage.getItem<string>("cachedWindows"),
+          browserTabManager.loadCachedTabs(),
+        ]);
+        if (!isMounted) return;
+        if (cachedWindowsRaw) {
+          const cachedWindows = parseCachedWindows(cachedWindowsRaw, Date.now(), CACHED_WINDOWS_MAX_AGE_MS);
+          if (cachedWindows !== null) setWindows(cachedWindows as YabaiWindow[]);
+        }
+        if (cachedTabs !== null) setBrowserTabs(cachedTabs);
+      } catch (error) {
+        console.error("Failed to hydrate cached data:", error);
+      }
+
+      if (!isMounted) return;
+      beginTabLoading();
+      tabsLoadedRef.current = true;
+      const tabRefresh = browserTabManager
+        .queryAllTabs(true)
+        .then((tabs) => {
+          if (!isMounted) return;
+          setBrowserTabs(tabs);
+          const warnings = browserTabManager.consumeWarnings();
+          if (warnings.length > 0) {
+            void showFailureToast(new Error(warnings.join("; ")), { title: "Some Browser Tabs Could Not Be Loaded" });
+          }
+        })
+        .catch(async (error) => {
+          tabsLoadedRef.current = false;
+          if (isMounted) await showFailureToast(error, { title: "Browser Tab Refresh Failed" });
+        })
+        .finally(() => {
+          if (isMounted) endTabLoading();
+        });
+
+      await Promise.allSettled([refreshAllData(true), tabRefresh]);
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [beginTabLoading, endTabLoading, refreshAllData]);
 
   // Create Fuse instance for browser tabs
   const tabFuse = useMemo(() => {
@@ -668,7 +644,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     let searchFuse = fuse;
     if (displayFilter.hasDisplayFilter && displayFilter.displayNumber !== null && windowsToSearch !== windows) {
       if (windowsToSearch.length > 0) {
-        const cacheKey = `display-${displayFilter.displayNumber}-${windowsToSearch.length}`;
+        const cacheKey = `display-${displayFilter.displayNumber}-${getWindowSetKey(windowsToSearch)}`;
         let cachedFuse = displayFilteredFuseCache.current.get(cacheKey);
 
         if (!cachedFuse) {
@@ -740,71 +716,41 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     });
   }, [applications, searchText, appFuse]);
 
-  // Sort windows based on selected sort method.
-  // Uses mergedFocusTimes which combines extension usage with yabai focus history
   const sortedWindows = useMemo(() => {
-    const windowsCopy = [...filteredWindows];
     const hasWindowSearchQuery = displayFilter.hasDisplayFilter
       ? displayFilter.remainingSearchText.trim().length > 0
       : searchText.trim().length > 0;
+    if (hasWindowSearchQuery) return [...filteredWindows];
 
-    if (hasWindowSearchQuery) {
-      return windowsCopy;
-    }
-
-    // Step 1: sort by focus time, with the currently-focused window always first.
-    windowsCopy.sort((a, b) => {
-      const aFocused = a["has-focus"] || a.focused;
-      const bFocused = b["has-focus"] || b.focused;
-      if (aFocused && !bFocused) return -1;
-      if (!aFocused && bFocused) return 1;
-
-      // Use merged focus times (includes yabai focus history for external focus changes)
-      // Falls back to usageTimes if merged data not yet available
-      const timeA = mergedFocusTimes[a.id] || usageTimes[a.id] || 0;
-      const timeB = mergedFocusTimes[b.id] || usageTimes[b.id] || 0;
-      return timeB - timeA;
-    });
-
-    // Step 2: explicitly place the previous window at position 1 (index 1).
-    // First try to find it by ID (reliable within the same yabai session).
-    // If that fails (IDs reset on reboot/restart), fall back to app name match.
-    // This ensures the "Alt+Tab previous" window is always at #2.
-    const prevId = focusHistory.previous;
-    const prevApp = focusHistory.previousApp;
-    if (windowsCopy.length > 1 && (prevId !== null || prevApp !== null)) {
-      let prevIdx = prevId !== null ? windowsCopy.findIndex((w) => w.id === prevId) : -1;
-      // Cross-session fallback: match by app name when ID is stale
-      if (prevIdx === -1 && prevApp !== null) {
-        prevIdx = windowsCopy.findIndex((w) => w.app === prevApp && !(w["has-focus"] || w.focused));
-      }
-      // Only move it if it exists, isn't already at position 1, and isn't the focused one
-      if (prevIdx > 1) {
-        const [prevWin] = windowsCopy.splice(prevIdx, 1);
-        windowsCopy.splice(1, 0, prevWin);
+    const sorted = sortWindowsByMethod(filteredWindows, sortMethod, usageTimes, mergedFocusTimes);
+    if (sortMethod === SortMethod.RECENTLY_USED && sorted.length > 1) {
+      const previous = resolveFocusReference(focusHistory.previous, sorted);
+      const previousIndex = previous ? sorted.findIndex((window) => window.id === previous.id) : -1;
+      if (previousIndex > 1) {
+        sorted.splice(1, 0, sorted.splice(previousIndex, 1)[0]);
       }
     }
-
-    // Debug: log sorted order
-    if (windowsCopy.length > 0 && isMergedFocusTimesReady) {
-      console.log(
-        "Sorted windows order:",
-        windowsCopy.slice(0, 5).map((w) => `${w.id}:${w.app}(${mergedFocusTimes[w.id] || 0})`),
-      );
-    }
-
-    return windowsCopy;
+    return sorted;
   }, [
-    filteredWindows,
-    mergedFocusTimes,
-    usageTimes,
-    isMergedFocusTimesReady,
-    focusHistory.previous,
-    focusHistory.previousApp,
     displayFilter.hasDisplayFilter,
     displayFilter.remainingSearchText,
+    filteredWindows,
+    focusHistory.previous,
+    mergedFocusTimes,
     searchText,
+    sortMethod,
+    usageTimes,
   ]);
+  const sortedWindowsRef = useRef(sortedWindows);
+  useEffect(() => {
+    sortedWindowsRef.current = sortedWindows;
+    const orderedIds = sortedWindows.map((window) => getWindowItemId(window.id));
+    const origin = getCycleOriginForSelection(selectedItemIdRef.current, orderedIds, cycleIndexRef.current);
+    if (origin !== cycleIndexRef.current) {
+      cycleIndexRef.current = origin;
+      setCycleIndex(origin);
+    }
+  }, [sortedWindows]);
 
   // Tab-cycling: select the window at the current cycle index.
   // First open = index 0, each subsequent Tab press increments.
@@ -818,30 +764,68 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const cycleNext = useCallback(() => {
     if (sortedWindows.length === 0) return;
     totalTabPressesRef.current += 1;
-    setCycleIndex((prev) => (prev + 1) % sortedWindows.length);
-  }, [sortedWindows.length]);
+    const nextIndex = getCycledIndex(cycleIndexRef.current, sortedWindows.length, "next");
+    cycleIndexRef.current = nextIndex;
+    setCycleIndex(nextIndex);
+    const nextItemId = getWindowItemId(sortedWindows[nextIndex].id);
+    selectedItemIdRef.current = nextItemId;
+    setUserSelectedItemId(nextItemId);
+  }, [sortedWindows]);
 
   const cyclePrev = useCallback(() => {
     if (sortedWindows.length === 0) return;
     totalTabPressesRef.current += 1;
-    setCycleIndex((prev) => (prev - 1 + sortedWindows.length) % sortedWindows.length);
-  }, [sortedWindows.length]);
+    const nextIndex = getCycledIndex(cycleIndexRef.current, sortedWindows.length, "previous");
+    cycleIndexRef.current = nextIndex;
+    setCycleIndex(nextIndex);
+    const nextItemId = getWindowItemId(sortedWindows[nextIndex].id);
+    selectedItemIdRef.current = nextItemId;
+    setUserSelectedItemId(nextItemId);
+  }, [sortedWindows]);
 
   // Cancel auto-select permanently when the user types anything
   useEffect(() => {
     if (inputText.length > 0 && !autoSelectCancelledRef.current) {
       autoSelectCancelledRef.current = true;
       // Also reset cycle index since the user is now searching
+      cycleIndexRef.current = 0;
       setCycleIndex(0);
     }
   }, [inputText]);
 
-  // Ref that always holds the latest altTabSelectedWindow so the timer
-  // callback can read it without stale closures.
-  const altTabSelectedWindowRef = useRef(altTabSelectedWindow);
+  const usageTimesRef = useRef(usageTimes);
   useEffect(() => {
-    altTabSelectedWindowRef.current = altTabSelectedWindow;
-  }, [altTabSelectedWindow]);
+    usageTimesRef.current = usageTimes;
+  }, [usageTimes]);
+
+  const persistSuccessfulFocus = useCallback(
+    async (window: YabaiWindow) => {
+      const nextFocusState = advanceFocusState(
+        { current: focusHistoryCurrentRef.current, previous: focusHistory.previous },
+        makeFocusReference(window),
+      );
+      const nextUsage = recordWindowUsage(usageTimesRef.current, window, Date.now());
+      focusHistoryCurrentRef.current = nextFocusState.current;
+      usageTimesRef.current = nextUsage;
+      setFocusHistory(nextFocusState);
+      setUsageTimes(nextUsage);
+      await Promise.all([
+        runBestEffort(
+          () =>
+            enqueueStorageWrite(async () => {
+              await LocalStorage.setItem("focusHistory", serializeFocusState(nextFocusState));
+              await LocalStorage.setItem("usageTimes", serializeUsageStorage(nextUsage));
+            }),
+          (error) => console.warn("Could not persist focused-window state:", error),
+        ),
+        runBestEffort(
+          () => focusHistoryManager.recordFocus(window),
+          (error) => console.warn("Could not append focus history:", error),
+        ),
+      ]);
+    },
+    [enqueueStorageWrite, focusHistory.previous],
+  );
 
   // Auto-select countdown — only activates after the first Tab press (cycleIndex >= 1).
   // Uses exponential backoff: more cycling = longer delay (user is unsure).
@@ -862,6 +846,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       return;
     }
     const delay = Math.min(Math.round(AUTO_SELECT_BASE * Math.pow(AUTO_SELECT_BACKOFF, presses - 1)), AUTO_SELECT_MAX);
+    const capturedTarget = makeFocusReference(altTabSelectedWindow);
 
     console.log(`Cycle ${cycleIndex} (${presses} total presses): auto-select delay = ${delay}ms`);
 
@@ -876,7 +861,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
     // Actual auto-select timer
     const timer = setTimeout(async () => {
-      const win = altTabSelectedWindowRef.current;
+      const win = resolveCountdownTarget(capturedTarget, selectedItemIdRef.current, sortedWindowsRef.current);
       if (!win || autoSelectCancelledRef.current) {
         setAutoSelectCountdown(null);
         return;
@@ -884,20 +869,15 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
       console.log(`Auto-select countdown fired, switching to ${win.app} (${win.id})`);
 
-      const now = Date.now();
-      const prevId = focusHistory.current;
-      const prevApp = focusHistory.currentApp;
-      setFocusHistory({ current: win.id, currentApp: win.app, previous: prevId, previousApp: prevApp });
-      setUsageTimes((prev) => ({ ...prev, [win.id]: now }));
-      focusHistoryManager.recordFocus(win.id);
-
       const focusAction = handleFocusWindow(
         win.id,
         win.app,
-        () => {
-          closeMainWindow();
+        async () => {
+          await persistSuccessfulFocus(win);
+          await closeMainWindow();
         },
         applications,
+        win.title,
       );
       await focusAction();
 
@@ -909,15 +889,27 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       clearInterval(interval);
       setAutoSelectCountdown(null);
     };
-  }, [cycleIndex, isMergedFocusTimesReady, isFocusHistoryLoaded]);
+  }, [applications, cycleIndex, isFocusHistoryLoaded, isMergedFocusTimesReady, persistSuccessfulFocus]);
 
   const searchWebQuery = tabFilter.remainingSearchText.trim();
+  const hasVisibleWindows =
+    !effectiveTabFilter.hasTabFilter &&
+    scopeFilter !== "applications" &&
+    scopeFilter !== "tabs" &&
+    sortedWindows.length > 0;
+  const hasVisibleApplications =
+    !effectiveTabFilter.hasTabFilter &&
+    scopeFilter !== "windows" &&
+    scopeFilter !== "tabs" &&
+    filteredApplications.length > 0;
+  const hasVisibleTabs = scopeFilter !== "windows" && scopeFilter !== "applications" && filteredTabs.length > 0;
   const shouldShowSearchWebResult =
     !calcMode.isCalcMode &&
     !(isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded) &&
-    sortedWindows.length === 0 &&
-    filteredApplications.length === 0 &&
-    filteredTabs.length === 0 &&
+    !hasVisibleWindows &&
+    !hasVisibleApplications &&
+    !hasVisibleTabs &&
+    shouldShowWebFallbackForScope(scopeFilter, effectiveTabFilter.hasTabFilter, displayFilter.hasDisplayFilter) &&
     searchWebQuery.length > 0;
 
   const visibleItemIds = useMemo(() => {
@@ -956,12 +948,31 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   ]);
 
   const selectedItemId = useMemo(() => {
-    return getDefaultSelectedItemId({
+    const defaultId = getDefaultSelectedItemId({
       hasSearchText: hasActiveSearch,
       emptySearchItemId: altTabSelectedWindow ? getWindowItemId(altTabSelectedWindow.id) : undefined,
       visibleItemIds,
     });
-  }, [altTabSelectedWindow, hasActiveSearch, visibleItemIds]);
+    return resolveVisibleSelection(userSelectedItemId, visibleItemIds, defaultId);
+  }, [altTabSelectedWindow, hasActiveSearch, userSelectedItemId, visibleItemIds]);
+
+  useEffect(() => {
+    selectedItemIdRef.current = selectedItemId;
+  }, [selectedItemId]);
+
+  const handleSelectionChange = useCallback((itemId: string | null) => {
+    const previousSelection = selectedItemIdRef.current;
+    selectedItemIdRef.current = itemId ?? undefined;
+    setUserSelectedItemId(itemId ?? undefined);
+    const orderedIds = sortedWindowsRef.current.map((window) => getWindowItemId(window.id));
+    const origin = getCycleOriginForSelection(itemId ?? undefined, orderedIds, cycleIndexRef.current);
+    cycleIndexRef.current = origin;
+    setCycleIndex(origin);
+    if (totalTabPressesRef.current > 0 && itemId !== previousSelection) {
+      autoSelectCancelledRef.current = true;
+      setAutoSelectCountdown(null);
+    }
+  }, []);
 
   // No need for focus/blur detection anymore since we only refresh on mount
 
@@ -970,7 +981,10 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   return (
     <List
-      isLoading={!calcMode.isCalcMode && (isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded)}
+      isLoading={
+        !calcMode.isCalcMode &&
+        (isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded)
+      }
       isShowingDetail={isShowingDetail}
       onSearchTextChange={setInputText}
       searchBarPlaceholder="Search windows, apps, tabs… (@ tabs, #N display, = calc)"
@@ -978,6 +992,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
       selectedItemId={selectedItemId}
+      onSelectionChange={handleSelectionChange}
       actions={
         <ActionPanel>
           <Action
@@ -997,14 +1012,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
             onAction={() => {
               tabsLoadedRef.current = false;
               browserTabManager.invalidateCache();
-              setIsLoadingTabs(true);
-              browserTabManager
-                .queryAllTabs()
-                .then((tabs) => {
-                  setBrowserTabs(tabs);
-                  tabsLoadedRef.current = true;
-                })
-                .finally(() => setIsLoadingTabs(false));
+              void loadBrowserTabs();
             }}
             shortcut={{ modifiers: ["cmd", "shift"], key: "t" }}
           />
@@ -1070,204 +1078,195 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         />
       )}
 
-      {!calcMode.isCalcMode && sortedWindows.length > 0 && !effectiveTabFilter.hasTabFilter && scopeFilter !== "applications" && scopeFilter !== "tabs" && (
-        <List.Section
-          title={(() => {
-            return displayFilter.hasDisplayFilter && displayFilter.displayNumber !== null
-              ? `Windows (Display #${displayFilter.displayNumber})`
-              : "Windows";
-          })()}
-          subtitle={(() => {
-            const count = sortedWindows.length.toString();
-            if (autoSelectCountdown !== null && autoSelectCountdown > 0) {
-              return `${count} · auto-switching in ${(autoSelectCountdown / 1000).toFixed(1)}s`;
-            }
-            return count;
-          })()}
-        >
-          {sortedWindows.map((win) => (
-            <List.Item
-              key={win.id}
-              id={getWindowItemId(win.id)}
-              icon={{
-                ...getAppIcon(win, applications),
-                tintColor: win["has-focus"] || win.focused ? "#10b981" : undefined,
-              }}
-              title={`${win["has-focus"] || win.focused ? "• " : ""}${win.app}`}
-              subtitle={win.title}
-              accessories={[
-                { tag: { value: `#${win.display || "?"}`, color: getDisplayColor(win.display) } },
-                ...(win["has-focus"] || win.focused ? [{ tag: { value: "focused", color: "#fbbf24" } }] : []),
-              ]}
-              keywords={win["has-focus"] || win.focused ? ["focused", "current"] : []}
-              detail={isShowingDetail ? <WindowDetailPanel win={win} mergedFocusTimes={mergedFocusTimes} /> : undefined}
-              actions={
-                <WindowActions
-                  windowId={win.id}
-                  windowApp={win.app}
-                  windowTitle={win.title}
-                  isFocused={win["has-focus"] || win.focused}
-                  onFocused={(id) => {
-                    const now = Date.now();
-                    const prevId = focusHistory.current;
-                    const prevApp = focusHistory.currentApp;
-
-                    // Update focus history: the window we're leaving becomes "previous",
-                    // the window we're switching to becomes "current".
-                    // Both ID and app name are stored: ID works within the same yabai session;
-                    // app name is the cross-session fallback when IDs reset (reboot/restart).
-                    setFocusHistory({ current: id, currentApp: win.app, previous: prevId, previousApp: prevApp });
-
-                    setUsageTimes((prev) => {
-                      const updated: Record<string, number> = { ...prev, [id]: now };
-                      return updated;
-                    });
-                    // Also record focus in yabai history for external tracking
-                    focusHistoryManager.recordFocus(id);
-                    // closeMainWindow() is called here for the already-focused window
-                    // shortcut path (isFocused === true, no yabai command is run).
-                    // For the normal focus path, handleFocusWindow calls closeMainWindow()
-                    // *before* the yabai command to prevent the race condition where
-                    // Raycast snaps focus back to the original space/display.
-                    closeMainWindow();
-                  }}
-                  onRemove={removeWindow}
-                  setSortMethod={setSortMethod}
-                  onRefresh={refreshAllData}
-                  isRefreshing={isRefreshing}
-                  applications={applications}
-                  setInputText={setInputText}
-                  windows={windows}
-                  onCycleNext={cycleNext}
-                  onCyclePrev={cyclePrev}
-                  onToggleDetail={() => setIsShowingDetail(!isShowingDetail)}
-                />
+      {!calcMode.isCalcMode &&
+        sortedWindows.length > 0 &&
+        !effectiveTabFilter.hasTabFilter &&
+        scopeFilter !== "applications" &&
+        scopeFilter !== "tabs" && (
+          <List.Section
+            title={(() => {
+              return displayFilter.hasDisplayFilter && displayFilter.displayNumber !== null
+                ? `Windows (Display #${displayFilter.displayNumber})`
+                : "Windows";
+            })()}
+            subtitle={(() => {
+              const count = sortedWindows.length.toString();
+              if (autoSelectCountdown !== null && autoSelectCountdown > 0) {
+                return `${count} · auto-switching in ${(autoSelectCountdown / 1000).toFixed(1)}s`;
               }
-            />
-          ))}
-        </List.Section>
-      )}
-
-      {!calcMode.isCalcMode && filteredApplications.length > 0 && !effectiveTabFilter.hasTabFilter && scopeFilter !== "windows" && scopeFilter !== "tabs" && (
-        <List.Section title="Applications" subtitle={filteredApplications.length.toString()}>
-          {filteredApplications.map((app) => (
-            <List.Item
-              key={app.path}
-              id={getApplicationItemId(app)}
-              icon={{ fileIcon: app.path }}
-              title={app.name}
-              detail={isShowingDetail ? <AppDetailPanel app={app} /> : undefined}
-              actions={
-                <ActionPanel>
-                  <Action
-                    title="Open Application"
-                    onAction={async () => {
-                      try {
-                        await closeMainWindow();
-                        if (app.path) {
-                          await launchApplicationByPath(app.path);
-                        } else {
-                          await launchApplicationByName(app.name);
-                        }
-                      } catch {
-                        // fallback: try by name if path launch failed
-                        try {
-                          await launchApplicationByName(app.name);
-                        } catch (e) {
-                          console.error("Failed to open application:", e);
-                        }
-                      }
+              return count;
+            })()}
+          >
+            {sortedWindows.map((win) => (
+              <List.Item
+                key={win.id}
+                id={getWindowItemId(win.id)}
+                icon={{
+                  ...getAppIcon(win, applications),
+                  tintColor: win["has-focus"] || win.focused ? "#10b981" : undefined,
+                }}
+                title={`${win["has-focus"] || win.focused ? "• " : ""}${win.app}`}
+                subtitle={win.title}
+                accessories={[
+                  { tag: { value: `#${win.display || "?"}`, color: getDisplayColor(win.display) } },
+                  ...(win["has-focus"] || win.focused ? [{ tag: { value: "focused", color: "#fbbf24" } }] : []),
+                ]}
+                keywords={win["has-focus"] || win.focused ? ["focused", "current"] : []}
+                detail={
+                  isShowingDetail ? <WindowDetailPanel win={win} mergedFocusTimes={mergedFocusTimes} /> : undefined
+                }
+                actions={
+                  <WindowActions
+                    windowId={win.id}
+                    windowApp={win.app}
+                    windowTitle={win.title}
+                    windowDisplay={win.display}
+                    isFocused={win["has-focus"] || win.focused}
+                    onFocused={async () => {
+                      await persistSuccessfulFocus(win);
+                      await closeMainWindow();
                     }}
+                    setSortMethod={setSortMethod}
+                    onRefresh={refreshAllData}
+                    isRefreshing={isRefreshing}
+                    applications={applications}
+                    setInputText={setInputText}
+                    windows={windows}
+                    onCycleNext={cycleNext}
+                    onCyclePrev={cyclePrev}
+                    onToggleDetail={() => setIsShowingDetail(!isShowingDetail)}
                   />
-                  <Action
-                    title="Open in New Space"
-                    onAction={handleOpenWindowInNewSpace(-1, app.name)}
-                    shortcut={{ modifiers: ["opt"], key: "enter" }}
-                  />
-                  <Action
-                    title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
-                    onAction={() => refreshAllData(true)}
-                    shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
-                  />
-                  <ActionPanel.Section title="Display Filters">
+                }
+              />
+            ))}
+          </List.Section>
+        )}
+
+      {!calcMode.isCalcMode &&
+        filteredApplications.length > 0 &&
+        !effectiveTabFilter.hasTabFilter &&
+        scopeFilter !== "windows" &&
+        scopeFilter !== "tabs" && (
+          <List.Section title="Applications" subtitle={filteredApplications.length.toString()}>
+            {filteredApplications.map((app) => (
+              <List.Item
+                key={app.path}
+                id={getApplicationItemId(app)}
+                icon={{ fileIcon: app.path }}
+                title={app.name}
+                detail={isShowingDetail ? <AppDetailPanel app={app} /> : undefined}
+                actions={
+                  <ActionPanel>
                     <Action
-                      title="Clear Filter"
-                      onAction={() => setInputText("")}
-                      shortcut={{ modifiers: ["opt", "ctrl"], key: "0" }}
+                      title="Open Application"
+                      onAction={async () => {
+                        try {
+                          await closeMainWindow();
+                          if (app.path) {
+                            await launchApplicationByPath(app.path);
+                          } else {
+                            await launchApplicationByName(app.name);
+                          }
+                        } catch {
+                          // fallback: try by name if path launch failed
+                          try {
+                            await launchApplicationByName(app.name);
+                          } catch (e) {
+                            console.error("Failed to open application:", e);
+                          }
+                        }
+                      }}
                     />
-                    {availableDisplays.slice(0, 9).map((displayNum) => (
+                    <Action
+                      title="Open in New Space"
+                      onAction={handleOpenWindowInNewSpace(-1, app.name)}
+                      shortcut={{ modifiers: ["opt"], key: "enter" }}
+                    />
+                    <Action
+                      title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
+                      onAction={() => refreshAllData(true)}
+                      shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
+                    />
+                    <ActionPanel.Section title="Display Filters">
                       <Action
-                        key={`app-filter-display-${displayNum}`}
-                        title={`Filter Display #${displayNum}`}
-                        onAction={() => setInputText(`#${displayNum}`)}
-                        shortcut={{ modifiers: ["opt", "ctrl"], key: String(displayNum) as never }}
+                        title="Clear Filter"
+                        onAction={() => setInputText("")}
+                        shortcut={{ modifiers: ["opt", "ctrl"], key: "0" }}
                       />
-                    ))}
-                  </ActionPanel.Section>
-                </ActionPanel>
-              }
-            />
-          ))}
-        </List.Section>
-      )}
+                      {availableDisplays.slice(0, 9).map((displayNum) => (
+                        <Action
+                          key={`app-filter-display-${displayNum}`}
+                          title={`Filter Display #${displayNum}`}
+                          onAction={() => setInputText(`#${displayNum}`)}
+                          shortcut={{ modifiers: ["opt", "ctrl"], key: String(displayNum) as never }}
+                        />
+                      ))}
+                    </ActionPanel.Section>
+                  </ActionPanel>
+                }
+              />
+            ))}
+          </List.Section>
+        )}
 
-      {!calcMode.isCalcMode && filteredTabs.length > 0 && scopeFilter !== "windows" && scopeFilter !== "applications" && (
-        <List.Section title="Browser Tabs" subtitle={filteredTabs.length.toString()}>
-          {filteredTabs.map((tab) => (
-            <List.Item
-              key={tab.id}
-              id={getTabItemId(tab.id)}
-              icon={
-                tab.url && !tab.url.startsWith("about:") && !tab.url.startsWith("chrome://")
-                  ? getFavicon(tab.url, { fallback: getBrowserIcon(tab.browser) })
-                  : { source: getBrowserIcon(tab.browser), fallback: Icon.Globe }
-              }
-              title={tab.title || "Untitled"}
-              subtitle={tab.domain}
-              detail={isShowingDetail ? <BrowserTabDetailPanel tab={tab} /> : undefined}
-              accessories={[
-                { tag: { value: tab.browser.split(" ")[0], color: getBrowserColor(tab.browser) } },
-                ...(tab.isActive ? [{ tag: { value: "active", color: "#10b981" } }] : []),
-              ]}
-              actions={
-                <ActionPanel>
-                  <Action title="Switch to Tab" onAction={handleFocusBrowserTab(tab, () => closeMainWindow())} />
-                  <Action.CopyToClipboard
-                    title="Copy URL"
-                    content={tab.url}
-                    shortcut={{ modifiers: ["cmd", "shift"], key: "c" }}
-                  />
-                  <Action
-                    title="Close Tab"
-                    onAction={handleCloseBrowserTab(tab, () => {
-                      setBrowserTabs((prev) => prev.filter((t) => t.id !== tab.id));
-                    })}
-                    shortcut={{ modifiers: ["cmd", "ctrl"], key: "w" }}
-                  />
-                  <Action
-                    title="Refresh Tabs"
-                    onAction={() => {
-                      tabsLoadedRef.current = false;
-                      browserTabManager.invalidateCache();
-                      setIsLoadingTabs(true);
-                      browserTabManager
-                        .queryAllTabs()
-                        .then(setBrowserTabs)
-                        .finally(() => setIsLoadingTabs(false));
-                    }}
-                    shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
-                  />
-                  <Action
-                    title="Clear Tab Filter"
-                    onAction={() => setInputText("")}
-                    shortcut={{ modifiers: ["cmd"], key: "backspace" }}
-                  />
-                </ActionPanel>
-              }
-            />
-          ))}
-        </List.Section>
-      )}
+      {!calcMode.isCalcMode &&
+        filteredTabs.length > 0 &&
+        scopeFilter !== "windows" &&
+        scopeFilter !== "applications" && (
+          <List.Section title="Browser Tabs" subtitle={filteredTabs.length.toString()}>
+            {filteredTabs.map((tab) => (
+              <List.Item
+                key={tab.id}
+                id={getTabItemId(tab.id)}
+                icon={
+                  tab.url && !tab.url.startsWith("about:") && !tab.url.startsWith("chrome://")
+                    ? getFavicon(tab.url, { fallback: getBrowserIcon(tab.browser) })
+                    : { source: getBrowserIcon(tab.browser), fallback: Icon.Globe }
+                }
+                title={tab.title || "Untitled"}
+                subtitle={tab.domain}
+                detail={isShowingDetail ? <BrowserTabDetailPanel tab={tab} /> : undefined}
+                accessories={[
+                  { tag: { value: tab.browser.split(" ")[0], color: getBrowserColor(tab.browser) } },
+                  ...(tab.isActive ? [{ tag: { value: "active", color: "#10b981" } }] : []),
+                ]}
+                actions={
+                  <ActionPanel>
+                    <Action title="Switch to Tab" onAction={handleFocusBrowserTab(tab, () => closeMainWindow())} />
+                    <Action.CopyToClipboard
+                      title="Copy URL"
+                      content={tab.url}
+                      shortcut={{ modifiers: ["cmd", "shift"], key: "c" }}
+                    />
+                    {canCloseBrowserTab(tab.browser) && (
+                      <Action
+                        title="Close Tab"
+                        onAction={handleCloseBrowserTab(tab, () => {
+                          setBrowserTabs((prev) => prev.filter((t) => t.id !== tab.id));
+                        })}
+                        shortcut={{ modifiers: ["cmd", "ctrl"], key: "w" }}
+                      />
+                    )}
+                    <Action
+                      title="Refresh Tabs"
+                      onAction={() => {
+                        tabsLoadedRef.current = false;
+                        browserTabManager.invalidateCache();
+                        void loadBrowserTabs();
+                      }}
+                      shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
+                    />
+                    <Action
+                      title="Clear Tab Filter"
+                      onAction={() => setInputText("")}
+                      shortcut={{ modifiers: ["cmd"], key: "backspace" }}
+                    />
+                  </ActionPanel>
+                }
+              />
+            ))}
+          </List.Section>
+        )}
 
       {!calcMode.isCalcMode && shouldShowSearchWebResult && (
         <List.Item
@@ -1300,9 +1299,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       {!calcMode.isCalcMode &&
         !(isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded) &&
         !shouldShowSearchWebResult &&
-        sortedWindows.length === 0 &&
-        filteredApplications.length === 0 &&
-        filteredTabs.length === 0 && (
+        !hasVisibleWindows &&
+        !hasVisibleApplications &&
+        !hasVisibleTabs && (
           <List.EmptyView
             title={effectiveTabFilter.hasTabFilter ? "No Browser Tabs Found" : "No Windows or Applications Found"}
             description={
@@ -1320,8 +1319,9 @@ function WindowActions({
   windowId,
   windowApp,
   windowTitle,
+  windowDisplay,
   onFocused,
-  onRemove,
+
   setSortMethod,
   onRefresh,
   isRefreshing,
@@ -1337,8 +1337,9 @@ function WindowActions({
   windowId: number;
   windowApp: string;
   windowTitle: string;
-  onFocused: (id: number) => void;
-  onRemove: (id: number) => void;
+  windowDisplay?: number;
+  onFocused: (id: number) => void | Promise<void>;
+
   setSortMethod: (method: SortMethod) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
@@ -1353,38 +1354,36 @@ function WindowActions({
   const availableDisplays = useMemo(() => getAvailableDisplayNumbers(windows), [windows]);
   return (
     <ActionPanel>
-      <Action title="Switch to Window" onAction={handleFocusWindow(windowId, windowApp, onFocused, applications)} />
+      <Action
+        title="Switch to Window"
+        onAction={handleFocusWindow(windowId, windowApp, onFocused, applications, windowTitle)}
+      />
       <Action
         title="Open in New Space"
-        onAction={handleOpenWindowInNewSpace(windowId, windowApp)}
+        onAction={handleOpenWindowInNewSpace(windowId, windowApp, windowTitle)}
         shortcut={{ modifiers: ["opt"], key: "enter" }}
       />
-      <Action
-        title="Aggregate to Space"
-        onAction={handleAggregateToSpace(windowId, windowApp)}
-        shortcut={{ modifiers: ["cmd", "ctrl"], key: "m" }}
-      />
-      <Action
-        title="Close Window"
-        onAction={handleCloseWindow(windowId, windowApp, onRemove)}
-        shortcut={{ modifiers: ["cmd", "ctrl"], key: "w" }}
-      />
-      <Action
-        title="Close Empty Spaces"
-        onAction={handleCloseEmptySpaces(windowId, onRemove)}
-        shortcut={{ modifiers: ["cmd", "ctrl"], key: "q" }}
-      />
+
       <Action
         title={isRefreshing ? "Refreshing…" : "Refresh Windows & Apps"}
         onAction={onRefresh}
         shortcut={{ modifiers: ["cmd", "ctrl"], key: "r" }}
       />
       <ActionPanel.Section title="Display Actions">
-        <MoveToFocusedDisplayAction windowId={windowId} windowApp={windowApp} />
-        <InteractiveMoveToDisplayAction windowId={windowId} windowApp={windowApp} windowTitle={windowTitle} />
-        <DisperseOnDisplayActions />
-        <MoveWindowToDisplayActions windowId={windowId} windowApp={windowApp} />
-        <MoveToDisplaySpace windowId={windowId} windowApp={windowApp} />
+        <MoveToFocusedDisplayAction windowId={windowId} windowApp={windowApp} windowTitle={windowTitle} />
+        <InteractiveMoveToDisplayAction
+          windowId={windowId}
+          windowApp={windowApp}
+          windowTitle={windowTitle}
+          currentDisplay={windowDisplay}
+        />
+
+        <MoveWindowToDisplayActions
+          windowId={windowId}
+          windowApp={windowApp}
+          windowTitle={windowTitle}
+          currentDisplay={windowDisplay}
+        />
       </ActionPanel.Section>
       <ActionPanel.Section title="Space Management">
         <SpaceManagementActions />
@@ -1477,13 +1476,7 @@ function getAppIcon(window: YabaiWindow, applications: Application[]) {
 
 // ---- Detail panel components ----
 
-function WindowDetailPanel({
-  win,
-  mergedFocusTimes,
-}: {
-  win: YabaiWindow;
-  mergedFocusTimes: Record<number, number>;
-}) {
+function WindowDetailPanel({ win, mergedFocusTimes }: { win: YabaiWindow; mergedFocusTimes: Record<number, number> }) {
   const lastFocusMs = mergedFocusTimes[win.id] ?? 0;
   const lastFocusStr = lastFocusMs > 0 ? new Date(lastFocusMs).toLocaleString() : "Not recorded";
   const frameStr = win.frame
