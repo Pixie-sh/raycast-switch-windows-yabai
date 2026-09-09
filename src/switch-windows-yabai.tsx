@@ -216,11 +216,8 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const isFocusHistoryLoadedRef = useRef(false);
 
   // Auto-select countdown state — mimics Cmd+Tab release behavior.
-  // Uses exponential backoff: quick switch (1 Tab) is fast, more cycling = more thinking time.
-  // delay = min(BASE * BACKOFF^(cycles-1), MAX)
-  const AUTO_SELECT_BASE = 1050;
-  const AUTO_SELECT_BACKOFF = 1.4;
-  const AUTO_SELECT_MAX = 3000;
+  // Allow another Tab press without making later selections progressively slower.
+  const AUTO_SELECT_DELAY_MS = 250;
   const AUTO_SELECT_GIVE_UP = 6; // After this many Tab presses, cancel countdown entirely
   const autoSelectCancelledRef = useRef(false);
   const [autoSelectCountdown, setAutoSelectCountdown] = useState<number | null>(null);
@@ -828,8 +825,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   );
 
   // Auto-select countdown — only activates after the first Tab press (cycleIndex >= 1).
-  // Uses exponential backoff: more cycling = longer delay (user is unsure).
-  // cycleIndex 1 → 750ms, 2 → 1050ms, 3 → 1470ms, 4 → 2058ms, 5+ → capped at 3000ms.
+  // Restart the same short pause after each press.
   // React cleanup handles clearing timers on each re-run.
   useEffect(() => {
     if (autoSelectCancelledRef.current) return;
@@ -845,7 +841,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       autoSelectCancelledRef.current = true;
       return;
     }
-    const delay = Math.min(Math.round(AUTO_SELECT_BASE * Math.pow(AUTO_SELECT_BACKOFF, presses - 1)), AUTO_SELECT_MAX);
+    const delay = AUTO_SELECT_DELAY_MS;
     const capturedTarget = makeFocusReference(altTabSelectedWindow);
 
     console.log(`Cycle ${cycleIndex} (${presses} total presses): auto-select delay = ${delay}ms`);

@@ -168,14 +168,18 @@ end run`;
     set targetWindowIndex to 0
     set targetTabIndex to 0
     repeat with w from 1 to count of windows
-      repeat with t from 1 to count of tabs of window w
-        set candidateTab to tab t of window w
-        if (URL of candidateTab as text) is expectedURL and (${titleProperty} of candidateTab as text) is expectedTitle then
-          set matchCount to matchCount + 1
-          set targetWindowIndex to w
-          set targetTabIndex to t
-        end if
-      end repeat
+      if (count of tabs of window w) > 0 then
+        set tabURLs to URL of every tab of window w
+        set tabTitles to ${titleProperty} of every tab of window w
+        if (count of tabURLs) is not (count of tabTitles) then error "Tabs changed; refresh and try again"
+        repeat with t from 1 to count of tabURLs
+          if (item t of tabURLs as text) is expectedURL and (item t of tabTitles as text) is expectedTitle then
+            set matchCount to matchCount + 1
+            set targetWindowIndex to w
+            set targetTabIndex to t
+          end if
+        end repeat
+      end if
     end repeat
     if matchCount is not 1 then error "Tab identity is missing or ambiguous"
     ${mutation}

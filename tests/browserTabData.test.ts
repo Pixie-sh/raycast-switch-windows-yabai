@@ -52,6 +52,24 @@ test("tab focus combines identity lookup and mutation in one duplicate-safe Appl
   }
 });
 
+test("tab focus batches browser property reads instead of issuing requests per tab", () => {
+  for (const browser of ["Safari", "Google Chrome", "Vivaldi", "Brave Browser", "Microsoft Edge", "Arc", "Opera", "Opera GX"]) {
+    const script = buildAtomicFocusTabScript(browser);
+    assert.match(script, /set tabURLs to URL of every tab of window w/);
+    assert.match(script, /set tabTitles to (name|title) of every tab of window w/);
+    assert.match(script, /item t of tabURLs/);
+    assert.match(script, /item t of tabTitles/);
+    assert.doesNotMatch(script, /URL of candidateTab/);
+    assert.match(script, /matchCount is not 1/);
+  }
+});
+
+test("tab focus skips empty windows before requesting bulk properties", () => {
+  const script = buildAtomicFocusTabScript("Safari");
+  assert.ok(script.indexOf("if (count of tabs of window w) > 0 then") >= 0);
+  assert.ok(script.indexOf("if (count of tabs of window w) > 0 then") < script.indexOf("set tabURLs"));
+});
+
 test("Chrome atomic focus AppleScript compiles when Chrome is installed", async (t) => {
   if (!existsSync("/Applications/Google Chrome.app")) return t.skip("Google Chrome is not installed");
   await execFileAsync("/usr/bin/osacompile", [
