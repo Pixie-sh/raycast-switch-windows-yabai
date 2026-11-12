@@ -42,6 +42,7 @@ import {
   FocusState,
   getCycledIndex,
   getCycleOriginForSelection,
+  getInitialDisplayedWindowItemId,
   getWindowSetKey,
   hydrateWindowState,
   makeFocusReference,
@@ -210,7 +211,8 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   // Focus tracking state - merges extension usage with yabai focus history
   const [mergedFocusTimes, setMergedFocusTimes] = useState<Record<number, number>>({});
   const [isFocusTrackingSetup, setIsFocusTrackingSetup] = useState<boolean | null>(null);
-  const [isMergedFocusTimesReady, setIsMergedFocusTimesReady] = useState(false);
+  const [mergedFocusWindows, setMergedFocusWindows] = useState<YabaiWindow[] | null>(null);
+  const isMergedFocusTimesReady = mergedFocusWindows === windows;
   // Gate sorting until persisted focus references are hydrated.
   const [isFocusHistoryLoaded, setIsFocusHistoryLoaded] = useState(false);
   const isFocusHistoryLoadedRef = useRef(false);
@@ -223,11 +225,14 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const [autoSelectCountdown, setAutoSelectCountdown] = useState<number | null>(null);
 
   // Tab-cycling state — controlled via Tab / Shift+Tab actions within the open extension.
-  // Starts at index 0 (first item highlighted). Cycling starts the auto-select countdown.
+  // Cycling starts from the selected row and starts the auto-select countdown.
   const [cycleIndex, setCycleIndex] = useState(0);
   const cycleIndexRef = useRef(0);
   const [userSelectedItemId, setUserSelectedItemId] = useState<string>();
   const selectedItemIdRef = useRef<string | undefined>(undefined);
+  const initialSelectionInitializedRef = useRef(false);
+  const [isInitialWindowQuerySettled, setIsInitialWindowQuerySettled] = useState(false);
+  const userInteractedRef = useRef(false);
   // Total Tab presses (never wraps). Used for exponential backoff so it doesn't
   // reset when cycleIndex wraps back to 0.
   const totalTabPressesRef = useRef(0);
@@ -312,6 +317,8 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
       } catch (error) {
         console.error("Error refreshing windows:", error);
       } finally {
+        // A failed initial query must not leave cached-list navigation disabled.
+        setIsInitialWindowQuerySettled(true);
         endRefreshActivity();
       }
     },
@@ -380,22 +387,22 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
     const generation = ++mergeGenerationRef.current;
     if (windows.length === 0) {
       setMergedFocusTimes({});
-      setIsMergedFocusTimesReady(true);
+      setMergedFocusWindows(windows);
       return;
     }
-    setIsMergedFocusTimesReady(false);
+    setMergedFocusWindows(null);
     focusHistoryManager.invalidateCache();
     getMergedFocusTimes(usageTimes, windows)
       .then((merged) => {
         if (generation !== mergeGenerationRef.current) return;
         setMergedFocusTimes(merged);
-        setIsMergedFocusTimesReady(true);
+        setMergedFocusWindows(windows);
       })
       .catch((error) => {
         if (generation !== mergeGenerationRef.current) return;
         console.error("Failed to merge focus history:", error);
         setMergedFocusTimes({});
-        setIsMergedFocusTimesReady(true);
+        setMergedFocusWindows(windows);
       });
   }, [isFocusHistoryLoaded, lastRefreshTime, usageTimes, windows]);
 
@@ -741,16 +748,26 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   const sortedWindowsRef = useRef(sortedWindows);
   useEffect(() => {
     sortedWindowsRef.current = sortedWindows;
-    const orderedIds = sortedWindows.map((window) => getWindowItemId(window.id));
-    const origin = getCycleOriginForSelection(selectedItemIdRef.current, orderedIds, cycleIndexRef.current);
-    if (origin !== cycleIndexRef.current) {
-      cycleIndexRef.current = origin;
-      setCycleIndex(origin);
-    }
   }, [sortedWindows]);
 
+  // Freeze the startup default only after the live query and ordering inputs
+  // are ready. Cache and loading callbacks must not establish a selection.
+  const initializeInitialWindowSelection = useCallback(() => {
+    if (initialSelectionInitializedRef.current || userInteractedRef.current) return;
+    if (!isInitialWindowQuerySettled || !isFocusHistoryLoaded || !isMergedFocusTimesReady) return;
+
+    const initialItemId = getInitialDisplayedWindowItemId(sortedWindows);
+    initialSelectionInitializedRef.current = true;
+    if (!initialItemId) return;
+
+    const initialIndex = sortedWindows.findIndex((window) => getWindowItemId(window.id) === initialItemId);
+    cycleIndexRef.current = initialIndex;
+    setCycleIndex(initialIndex);
+    selectedItemIdRef.current = initialItemId;
+    setUserSelectedItemId(initialItemId);
+  }, [isFocusHistoryLoaded, isInitialWindowQuerySettled, isMergedFocusTimesReady, sortedWindows]);
+
   // Tab-cycling: select the window at the current cycle index.
-  // First open = index 0, each subsequent Tab press increments.
   const altTabSelectedWindow = useMemo(() => {
     if (sortedWindows.length === 0) return undefined;
     const effectiveIndex = cycleIndex % sortedWindows.length;
@@ -760,6 +777,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   // Cycle callbacks for Tab / Shift+Tab actions
   const cycleNext = useCallback(() => {
     if (sortedWindows.length === 0) return;
+    userInteractedRef.current = true;
     totalTabPressesRef.current += 1;
     const nextIndex = getCycledIndex(cycleIndexRef.current, sortedWindows.length, "next");
     cycleIndexRef.current = nextIndex;
@@ -771,6 +789,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   const cyclePrev = useCallback(() => {
     if (sortedWindows.length === 0) return;
+    userInteractedRef.current = true;
     totalTabPressesRef.current += 1;
     const nextIndex = getCycledIndex(cycleIndexRef.current, sortedWindows.length, "previous");
     cycleIndexRef.current = nextIndex;
@@ -783,6 +802,7 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
   // Cancel auto-select permanently when the user types anything
   useEffect(() => {
     if (inputText.length > 0 && !autoSelectCancelledRef.current) {
+      userInteractedRef.current = true;
       autoSelectCancelledRef.current = true;
       // Also reset cycle index since the user is now searching
       cycleIndexRef.current = 0;
@@ -954,21 +974,50 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
 
   useEffect(() => {
     selectedItemIdRef.current = selectedItemId;
-  }, [selectedItemId]);
-
-  const handleSelectionChange = useCallback((itemId: string | null) => {
-    const previousSelection = selectedItemIdRef.current;
-    selectedItemIdRef.current = itemId ?? undefined;
-    setUserSelectedItemId(itemId ?? undefined);
-    const orderedIds = sortedWindowsRef.current.map((window) => getWindowItemId(window.id));
-    const origin = getCycleOriginForSelection(itemId ?? undefined, orderedIds, cycleIndexRef.current);
-    cycleIndexRef.current = origin;
-    setCycleIndex(origin);
-    if (totalTabPressesRef.current > 0 && itemId !== previousSelection) {
-      autoSelectCancelledRef.current = true;
-      setAutoSelectCountdown(null);
+    const orderedIds = sortedWindows.map((window) => getWindowItemId(window.id));
+    const origin = getCycleOriginForSelection(selectedItemId, orderedIds, cycleIndexRef.current);
+    if (origin !== cycleIndexRef.current) {
+      cycleIndexRef.current = origin;
+      setCycleIndex(origin);
     }
+  }, [selectedItemId, sortedWindows]);
+
+  useEffect(() => {
+    initializeInitialWindowSelection();
+  }, [initializeInitialWindowSelection]);
+
+  const handleSelectionChange = useCallback(
+    (itemId: string | null) => {
+      if ((!isInitialWindowQuerySettled || !initialSelectionInitializedRef.current) && !userInteractedRef.current)
+        return;
+      userInteractedRef.current = true;
+      const previousSelection = selectedItemIdRef.current;
+      selectedItemIdRef.current = itemId ?? undefined;
+      setUserSelectedItemId(itemId ?? undefined);
+      const orderedIds = sortedWindowsRef.current.map((window) => getWindowItemId(window.id));
+      const origin = getCycleOriginForSelection(itemId ?? undefined, orderedIds, cycleIndexRef.current);
+      cycleIndexRef.current = origin;
+      setCycleIndex(origin);
+      if (totalTabPressesRef.current > 0 && itemId !== previousSelection) {
+        autoSelectCancelledRef.current = true;
+        setAutoSelectCountdown(null);
+      }
+    },
+    [isInitialWindowQuerySettled],
+  );
+
+  const handleSearchTextChange = useCallback((text: string) => {
+    if (text.length > 0) userInteractedRef.current = true;
+    setInputText(text);
   }, []);
+
+  const handleScopeChange = useCallback(
+    (scope: "all" | "windows" | "applications" | "tabs") => {
+      if (scope !== scopeFilter) userInteractedRef.current = true;
+      setScopeFilter(scope);
+    },
+    [scopeFilter],
+  );
 
   // No need for focus/blur detection anymore since we only refresh on mount
 
@@ -982,9 +1031,9 @@ export default function Command(_props: { launchContext?: { launchType: LaunchTy
         (isSearching || isRefreshing || isLoadingTabs || !isMergedFocusTimesReady || !isFocusHistoryLoaded)
       }
       isShowingDetail={isShowingDetail}
-      onSearchTextChange={setInputText}
+      onSearchTextChange={handleSearchTextChange}
       searchBarPlaceholder="Search windows, apps, tabs… (@ tabs, #N display, = calc)"
-      searchBarAccessory={<ScopeDropdown scopeFilter={scopeFilter} onScopeChange={setScopeFilter} />}
+      searchBarAccessory={<ScopeDropdown scopeFilter={scopeFilter} onScopeChange={handleScopeChange} />}
       filtering={false} // Disable built-in filtering since we're using Fuse.js
       throttle={false} // Disable throttling for more responsive search
       selectedItemId={selectedItemId}

@@ -5,6 +5,7 @@ import {
   advanceFocusState,
   getCycledIndex,
   getCycleOriginForSelection,
+  getInitialDisplayedWindowItemId,
   getWindowSetKey,
   hydrateWindowState,
   migrateFocusState,
@@ -29,6 +30,37 @@ test("cycling advances independently of a retained controlled selection", () => 
 test("manual selection and reordered lists synchronize the cycling origin", () => {
   assert.equal(getCycleOriginForSelection("window-2", ["window-3", "window-2", "window-1"], 0), 1);
   assert.equal(getCycleOriginForSelection("app-Mail", ["window-3", "window-2"], 1), 1);
+});
+
+test("startup selects the second displayed row regardless of raw query order or focus", () => {
+  const displayed = [
+    { id: 3, app: "Terminal", title: "Shell", display: 1, space: 1 },
+    { id: 1, app: "Mail", title: "Inbox", display: 1, space: 1 },
+    { id: 2, app: "Code", title: "Project", display: 1, space: 1, "has-focus": true },
+  ];
+  assert.equal(getInitialDisplayedWindowItemId(displayed), "window-1");
+  assert.deepEqual(displayed.map((window) => window.id), [3, 1, 2]);
+});
+
+test("startup falls back to the first displayed row for one window and no row for none", () => {
+  assert.equal(getInitialDisplayedWindowItemId([{ id: 2, app: "Code", title: "Project", display: 1, space: 1 }]), "window-2");
+  assert.equal(getInitialDisplayedWindowItemId([]), undefined);
+});
+
+test("a stable selection survives cache-to-fresh replacement and later refresh reordering", () => {
+  const cachedIds = ["window-9", "window-1"];
+  const freshIds = ["window-3", "window-2", "window-1"];
+  const reorderedFreshIds = ["window-1", "window-3", "window-2"];
+  assert.equal(resolveVisibleSelection("window-2", freshIds, freshIds[0]), "window-2");
+  assert.equal(resolveVisibleSelection("window-2", reorderedFreshIds, reorderedFreshIds[0]), "window-2");
+  assert.equal(resolveVisibleSelection("window-2", cachedIds, cachedIds[0]), "window-9");
+});
+
+test("Tab starts from the actual selected row in either direction", () => {
+  const ids = ["window-1", "window-2", "window-3"];
+  const origin = getCycleOriginForSelection("window-2", ids, 0);
+  assert.equal(getCycledIndex(origin, ids.length, "next"), 2);
+  assert.equal(getCycledIndex(origin, ids.length, "previous"), 0);
 });
 
 test("re-focusing current window preserves the actual previous reference", () => {

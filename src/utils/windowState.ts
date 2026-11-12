@@ -201,6 +201,15 @@ export function getCycleOriginForSelection(
   return index >= 0 ? index : fallbackIndex;
 }
 
+/**
+ * Select the second displayed window when available, otherwise the first.
+ * The input must already be in the table's display order.
+ */
+export function getInitialDisplayedWindowItemId<T extends WindowIdentity>(windows: T[]): string | undefined {
+  const window = windows[1] ?? windows[0];
+  return window ? `window-${window.id}` : undefined;
+}
+
 export function resolveCountdownTarget<T extends WindowIdentity>(
   captured: FocusReference,
   selectedItemId: string | undefined,

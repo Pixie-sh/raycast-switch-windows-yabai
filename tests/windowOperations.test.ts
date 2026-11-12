@@ -77,11 +77,12 @@ test("window identity rejects a recycled id from the same application", () => {
   assert.equal(isExpectedWindow(liveWindow, "Safari", "server"), false);
 });
 
-test("move and destructive action identity includes id, app, and title", () => {
+test("window identity is id and app; title changes are tolerated", () => {
   const expected = { id: 7, app: "Terminal", title: "server" };
   assert.equal(isSameWindowIdentity(expected, { ...expected, space: 1 }), true);
   assert.equal(isSameWindowIdentity(expected, { ...expected, id: 8, space: 1 }), false);
-  assert.equal(isSameWindowIdentity(expected, { ...expected, title: "logs", space: 1 }), false);
+  assert.equal(isSameWindowIdentity(expected, { ...expected, title: "logs", space: 1 }), true);
+  assert.equal(isSameWindowIdentity(expected, { ...expected, app: "terminal", space: 1 }), true);
   assert.equal(isSameWindowIdentity(expected, { ...expected, app: "Safari", space: 1 }), false);
 });
 

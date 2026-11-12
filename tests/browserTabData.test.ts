@@ -14,11 +14,13 @@ import {
   parseBrowserTabCache,
   parseBrowserTabOutput,
   resolveLiveTab,
+  TAB_FIELD_SEPARATOR,
+  TAB_RECORD_SEPARATOR,
 } from "../src/utils/browserTabData.ts";
 
 test("browser query serialization compiles as AppleScript", async () => {
   const script = buildBrowserQueryScript("Safari");
-  assert.match(script, /urlBase64/);
+  assert.doesNotMatch(script, /do shell script/);
   await execFileAsync("/usr/bin/osacompile", ["-e", script, "-o", "/tmp/raycast-yabai-browser-test.scpt"]);
 });
 
@@ -80,19 +82,19 @@ test("Chrome atomic focus AppleScript compiles when Chrome is installed", async 
   ]);
 });
 
-test("browser tab records are parsed as delimiter-safe JSON lines", () => {
+test("browser tab records are parsed from separator-delimited fields", () => {
   const output = [
-    JSON.stringify({
-      url: "https://example.com/a|||b",
-      title: "A ||| B",
-      windowIndex: 1,
-      tabIndex: 2,
-      isActive: false,
-    }),
-  ].join("\n");
+    ["https://example.com/a|||b", 'A ||| "B"\nline 2', "1", "2", "false"].join(TAB_FIELD_SEPARATOR),
+    ["https://example.org", "", "1", "3", "true"].join(TAB_FIELD_SEPARATOR),
+  ].join(TAB_RECORD_SEPARATOR);
   const tabs = parseBrowserTabOutput(output, "Safari");
+  assert.equal(tabs.length, 2);
   assert.equal(tabs[0].url, "https://example.com/a|||b");
-  assert.equal(tabs[0].title, "A ||| B");
+  assert.equal(tabs[0].title, 'A ||| "B"\nline 2');
+  assert.equal(tabs[0].isActive, false);
+  assert.equal(tabs[1].title, "Untitled");
+  assert.equal(tabs[1].id, "Safari-1-3");
+  assert.equal(tabs[1].isActive, true);
 });
 
 test("stale positional tab actions resolve current position by identity", () => {
@@ -129,29 +131,12 @@ test("persisted tab cache validates schema and accepts fresh empty results", () 
   assert.equal(parseBrowserTabCache('{"tabs":[],"timestamp":10001}', 10_000, 200), null);
 });
 
-test("browser records reject malformed base64", () => {
-  const output = JSON.stringify({
-    urlBase64: "%%%",
-    titleBase64: "QQ==",
-    windowIndex: 1,
-    tabIndex: 1,
-    isActive: true,
-  });
-  assert.throws(() => parseBrowserTabOutput(output, "Safari"), /base64/i);
-  assert.throws(
-    () =>
-      parseBrowserTabOutput(
-        JSON.stringify({
-          urlBase64: "AB==",
-          titleBase64: "QQ==",
-          windowIndex: 1,
-          tabIndex: 1,
-          isActive: true,
-        }),
-        "Safari",
-      ),
-    /base64/i,
-  );
+test("browser records reject malformed fields", () => {
+  const record = (fields: string[]) => fields.join(TAB_FIELD_SEPARATOR);
+  assert.throws(() => parseBrowserTabOutput(record(["https://a", "t", "1", "1"]), "Safari"), /Invalid browser tab/);
+  assert.throws(() => parseBrowserTabOutput(record(["https://a", "t", "0", "1", "true"]), "Safari"), /Invalid/);
+  assert.throws(() => parseBrowserTabOutput(record(["https://a", "t", "1", "x", "true"]), "Safari"), /Invalid/);
+  assert.throws(() => parseBrowserTabOutput(record(["https://a", "t", "1", "1", "yes"]), "Safari"), /Invalid/);
 });
 
 test("Firefox window placeholders do not expose incompatible close-tab behavior", () => {

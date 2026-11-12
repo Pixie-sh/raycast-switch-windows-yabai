@@ -1,4 +1,3 @@
-/* eslint-disable no-useless-escape -- AppleScript strings require literal backslash-quote sequences. */
 export interface RuntimeBrowserTab {
   id: string;
   browser: string;
@@ -10,32 +9,8 @@ export interface RuntimeBrowserTab {
   domain: string;
 }
 
-interface SerializedTab {
-  url?: string;
-  title?: string;
-  urlBase64?: string;
-  titleBase64?: string;
-  windowIndex: number;
-  tabIndex: number;
-  isActive: boolean;
-}
-
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
-}
-
-function isSerializedTab(value: unknown): value is SerializedTab {
-  if (!value || typeof value !== "object") return false;
-  const tab = value as Record<string, unknown>;
-  const hasUrl = typeof tab.url === "string" || typeof tab.urlBase64 === "string";
-  const hasTitle = typeof tab.title === "string" || typeof tab.titleBase64 === "string";
-  return (
-    hasUrl &&
-    hasTitle &&
-    isPositiveInteger(tab.windowIndex) &&
-    isPositiveInteger(tab.tabIndex) &&
-    typeof tab.isActive === "boolean"
-  );
 }
 
 function extractDomain(url: string): string {
@@ -190,53 +165,55 @@ end run`;
 end run`;
 }
 
+// Records are joined with ASCII record/unit separators instead of JSON, and tab
+// properties are fetched per window in bulk: one Apple event per tab plus a
+// shell-out per field took ~40ms per tab, which was seconds for a busy browser.
+export const TAB_RECORD_SEPARATOR = "\x1e";
+export const TAB_FIELD_SEPARATOR = "\x1f";
+
 export function buildBrowserQueryScript(browser: string): string {
   if (!isSupportedBrowser(browser)) throw new Error(`Unsupported browser: ${browser}`);
-  const appendRecord = `
-      set encodedURL to do shell script "/usr/bin/printf %s " & quoted form of (tabURL as text) & " | /usr/bin/base64 | /usr/bin/tr -d '\\n'"
-      set encodedTitle to do shell script "/usr/bin/printf %s " & quoted form of (tabTitle as text) & " | /usr/bin/base64 | /usr/bin/tr -d '\\n'"
-      set output to output & "{\\\"urlBase64\\\":\\\"" & encodedURL & "\\\",\\\"titleBase64\\\":\\\"" & encodedTitle & "\\\",\\\"windowIndex\\\":" & w & ",\\\"tabIndex\\\":" & t & ",\\\"isActive\\\":" & isActive & "}" & linefeed
-    `;
+  const prelude = `set output to ""
+set FS to character id 31
+set RS to character id 30
+if application "${browser}" is not running then return output`;
+  const appendWindowTabs = `
+    repeat with t from 1 to count of tabURLs
+      set output to output & ((item t of tabURLs) as text) & FS & ((item t of tabTitles) as text) & FS & w & FS & t & FS & (t = activeIdx) & RS
+    end repeat`;
   if (browser === "Safari") {
-    return `set output to ""
+    return `${prelude}
 tell application "Safari"
-  repeat with w from 1 to count of windows
-    set currentTab to current tab of window w
-    repeat with t from 1 to count of tabs of window w
-      set theTab to tab t of window w
-      set tabURL to URL of theTab
-      set tabTitle to name of theTab
-      set isActive to (theTab = currentTab)
-      ${appendRecord}
-    end repeat
+  set wins to windows
+  repeat with w from 1 to count of wins
+    set win to item w of wins
+    set tabURLs to URL of tabs of win
+    set tabTitles to name of tabs of win
+    set activeIdx to index of current tab of win
+    ${appendWindowTabs}
   end repeat
 end tell
 return output`;
   }
   if (browser === "Firefox") {
-    return `set output to ""
+    return `${prelude}
 tell application "Firefox"
-  repeat with w from 1 to count of windows
-    set t to 1
-    set tabURL to "about:blank"
-    set tabTitle to name of window w
-    set isActive to true
-    ${appendRecord}
+  set wins to windows
+  repeat with w from 1 to count of wins
+    set output to output & "about:blank" & FS & ((name of item w of wins) as text) & FS & w & FS & 1 & FS & true & RS
   end repeat
 end tell
 return output`;
   }
-  return `set output to ""
+  return `${prelude}
 tell application "${browser}"
-  repeat with w from 1 to count of windows
-    set activeIdx to active tab index of window w
-    repeat with t from 1 to count of tabs of window w
-      set theTab to tab t of window w
-      set tabURL to URL of theTab
-      set tabTitle to title of theTab
-      set isActive to (t = activeIdx)
-      ${appendRecord}
-    end repeat
+  set wins to windows
+  repeat with w from 1 to count of wins
+    set win to item w of wins
+    set tabURLs to URL of tabs of win
+    set tabTitles to title of tabs of win
+    set activeIdx to active tab index of win
+    ${appendWindowTabs}
   end repeat
 end tell
 return output`;
@@ -245,38 +222,27 @@ return output`;
 export function parseBrowserTabOutput(output: string, browser: string, maxTabs = 200): RuntimeBrowserTab[] {
   if (!isSupportedBrowser(browser)) throw new Error(`Unsupported browser: ${browser}`);
   const records = output
-    .split("\n")
-    .filter((line) => line.trim())
+    .split(TAB_RECORD_SEPARATOR)
+    .filter((record) => record.trim())
     .slice(0, maxTabs);
-  return records.map((line) => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      throw new Error(`Invalid browser tab JSON from ${browser}`);
+  return records.map((record) => {
+    const fields = record.split(TAB_FIELD_SEPARATOR);
+    if (fields.length !== 5) throw new Error(`Invalid browser tab data from ${browser}`);
+    const [url, rawTitle, rawWindowIndex, rawTabIndex, rawIsActive] = fields;
+    const windowIndex = Number(rawWindowIndex);
+    const tabIndex = Number(rawTabIndex);
+    if (!isPositiveInteger(windowIndex) || !isPositiveInteger(tabIndex) || !/^(true|false)$/.test(rawIsActive)) {
+      throw new Error(`Invalid browser tab data from ${browser}`);
     }
-    if (!isSerializedTab(parsed)) throw new Error(`Invalid browser tab data from ${browser}`);
-    const decodeBase64 = (value: string, label: string): string => {
-      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-        throw new Error(`Invalid ${label} base64 from ${browser}`);
-      }
-      const decoded = Buffer.from(value, "base64");
-      const text = decoded.toString("utf8");
-      if (decoded.toString("base64") !== value || !Buffer.from(text, "utf8").equals(decoded)) {
-        throw new Error(`Invalid ${label} base64 from ${browser}`);
-      }
-      return text;
-    };
-    const url = parsed.url ?? decodeBase64(parsed.urlBase64 ?? "", "URL");
-    const title = parsed.title ?? decodeBase64(parsed.titleBase64 ?? "", "title") ?? "Untitled";
+    const title = rawTitle.trim();
     return {
-      id: `${browser}-${parsed.windowIndex}-${parsed.tabIndex}`,
+      id: `${browser}-${windowIndex}-${tabIndex}`,
       browser,
-      windowIndex: parsed.windowIndex,
-      tabIndex: parsed.tabIndex,
+      windowIndex,
+      tabIndex,
       url,
       title: title || "Untitled",
-      isActive: parsed.isActive,
+      isActive: rawIsActive === "true",
       domain: extractDomain(url),
     };
   });

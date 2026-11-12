@@ -36,11 +36,13 @@ export function isExpectedWindow(window: WindowLike, expectedApp: string, expect
   return window.app?.toLowerCase() === expectedApp.toLowerCase() && window.title === expectedTitle;
 }
 
+// Titles change while the list is open (browser tabs, terminals, unread counts),
+// so identity is the yabai window id plus app only.
 export function isSameWindowIdentity(
   expected: Pick<WindowLike, "id" | "app" | "title">,
   live: Pick<WindowLike, "id" | "app" | "title">,
 ): boolean {
-  return expected.id === live.id && isExpectedWindow(live, expected.app ?? "", expected.title ?? "");
+  return expected.id === live.id && live.app?.toLowerCase() === expected.app?.toLowerCase();
 }
 
 export function assertSafeWindowCloseSupported(): never {
