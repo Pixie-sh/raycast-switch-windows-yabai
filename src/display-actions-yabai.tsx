@@ -20,26 +20,23 @@
  * - Use keyboard shortcuts for quick access to actions
  *
  * Display Actions:
- * - "Disperse Windows for Display #X": Distributes windows across spaces on the selected display
  * - "Move to Display #X": Moves the selected window to the specified display
  */
 
 import React from "react";
-import { Action, Keyboard, Icon } from "@raycast/api";
+import { Action, ActionPanel, Keyboard, Icon } from "@raycast/api";
 import { useExec } from "@raycast/utils";
 import {
-  handleDisperseWindowsBySpace,
   handleMoveWindowToDisplay,
-  handleMoveToDisplaySpace,
   getAvailableDisplays,
   handleInteractiveMoveToDisplay,
   handleMoveToFocusedDisplay,
   handleCreateSpace,
-  handleDestroySpace,
   handleFocusNextSpace,
   handleFocusPreviousSpace,
 } from "./handlers";
 import { ENV, YABAI, DisplayInfo } from "./models";
+import { parseYabaiDisplays } from "./utils/runtimeData";
 import KeyEquivalent = Keyboard.KeyEquivalent;
 
 interface Display {
@@ -52,69 +49,26 @@ interface Display {
   "has-focus": boolean;
 }
 
-export function DisperseOnDisplayActions() {
-  const {
-    isLoading,
-    data: displays,
-    error,
-  } = useExec<Display[]>(YABAI, ["-m", "query", "--displays"], {
-    env: ENV,
-    parseOutput: ({ stdout }) => {
-      if (!stdout) return [];
-      try {
-        // Ensure stdout is a string before parsing
-        const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
-        const parsed = JSON.parse(stdoutStr);
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (parseError) {
-        console.error("Error parsing displays data in DisplayActions:", parseError);
-        return [];
-      }
-    },
-    keepPreviousData: false,
-  });
-
-  if (isLoading) return null;
-  if (error) return null;
-
-  return (
-    <>
-      {displays?.map((display) => (
-        <Action
-          key={display.id}
-          title={`Disperse Windows for Display #${display.index}`}
-          onAction={handleDisperseWindowsBySpace(String(display.index))}
-          shortcut={{ modifiers: ["opt", "cmd"], key: display.index.toString() as KeyEquivalent }}
-        />
-      ))}
-    </>
-  );
-}
-
 interface MoveWindowToDisplayActionsProps {
   windowId: number;
   windowApp: string;
+  windowTitle: string;
+  currentDisplay?: number;
 }
 
-export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowToDisplayActionsProps) {
+export function MoveWindowToDisplayActions({
+  windowId,
+  windowApp,
+  windowTitle,
+  currentDisplay,
+}: MoveWindowToDisplayActionsProps) {
   const {
     isLoading,
     data: displays,
     error,
   } = useExec<Display[]>(YABAI, ["-m", "query", "--displays"], {
     env: ENV,
-    parseOutput: ({ stdout }) => {
-      if (!stdout) return [];
-      try {
-        // Ensure stdout is a string before parsing
-        const stdoutStr = typeof stdout === "string" ? stdout : JSON.stringify(stdout);
-        const parsed = JSON.parse(stdoutStr);
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (parseError) {
-        console.error("Error parsing displays data in MoveWindowToDisplayActions:", parseError);
-        return [];
-      }
-    },
+    parseOutput: ({ stdout }) => parseYabaiDisplays(stdout) as Display[],
     keepPreviousData: false,
   });
 
@@ -127,30 +81,17 @@ export function MoveWindowToDisplayActions({ windowId, windowApp }: MoveWindowTo
 
   return (
     <>
-      {displays?.map((display) => (
-        <Action
-          key={display.id}
-          title={`Move to Display #${display.index}`}
-          onAction={handleMoveWindowToDisplay(windowId, windowApp, String(display.index))}
-          shortcut={{ modifiers: ["cmd", "ctrl"], key: display.index.toString() as KeyEquivalent }}
-        />
-      ))}
+      {displays
+        ?.filter((display) => display.index !== currentDisplay)
+        .map((display) => (
+          <Action
+            key={display.id}
+            title={`Move to Display #${display.index}`}
+            onAction={handleMoveWindowToDisplay(windowId, windowApp, windowTitle, String(display.index))}
+            shortcut={{ modifiers: ["cmd", "ctrl"], key: display.index.toString() as KeyEquivalent }}
+          />
+        ))}
     </>
-  );
-}
-
-interface MoveToDisplaySpaceProps {
-  windowId: number;
-  windowApp: string;
-}
-
-export function MoveToDisplaySpace({ windowId, windowApp }: MoveToDisplaySpaceProps) {
-  return (
-    <Action
-      title="Move to Empty Space on Current Display"
-      onAction={handleMoveToDisplaySpace(windowId, windowApp)}
-      shortcut={{ modifiers: ["cmd", "shift"], key: "m" }}
-    />
   );
 }
 
@@ -158,93 +99,87 @@ interface InteractiveMoveToDisplayActionProps {
   windowId: number;
   windowApp: string;
   windowTitle: string;
+  currentDisplay?: number;
 }
 
 /**
  * Interactive component that allows users to select a display to move a window to
  * Uses a submenu to show all available displays dynamically
  */
-export function InteractiveMoveToDisplayAction({ windowId, windowApp }: InteractiveMoveToDisplayActionProps) {
+export function InteractiveMoveToDisplayAction({
+  windowId,
+  windowApp,
+  windowTitle,
+  currentDisplay,
+}: InteractiveMoveToDisplayActionProps) {
   const [displays, setDisplays] = React.useState<DisplayInfo[]>([]);
-  const [isLoading, setIsLoading] = React.useState(false);
+  const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
 
   const loadDisplays = React.useCallback(async () => {
-    if (displays.length > 0) return; // Don't reload if we already have displays
-
     setIsLoading(true);
     setError(null);
     try {
-      const availableDisplays = await getAvailableDisplays();
-      setDisplays(availableDisplays);
+      setDisplays(await getAvailableDisplays());
     } catch (err) {
       console.error("Failed to load displays:", err);
       setError(err instanceof Error ? err.message : "Failed to load displays");
     } finally {
       setIsLoading(false);
     }
-  }, [displays.length]);
+  }, []);
 
-  // If there's an error or only one display, show a simple action
+  React.useEffect(() => {
+    void loadDisplays();
+  }, [loadDisplays]);
+
   if (error) {
-    return <Action icon={Icon.ExclamationMark} title="Move to Display (Error)" subtitle={error} onAction={() => {}} />;
+    return <Action icon={Icon.ExclamationMark} title={`Retry Loading Displays (${error})`} onAction={loadDisplays} />;
   }
 
-  // If loading, show loading state
-  if (isLoading) {
-    return <Action icon={Icon.Clock} title="Loading Displays…" onAction={() => {}} />;
+  if (isLoading && displays.length === 0) {
+    return <Action icon={Icon.Clock} title="Loading Displays…" onAction={loadDisplays} />;
   }
 
-  // If only one display, show disabled action
-  if (displays.length <= 1) {
-    return (
-      <Action icon={Icon.Desktop} title="Move to Display" subtitle="Only one display available" onAction={() => {}} />
-    );
+  const targets = displays.filter((display) => display.index !== currentDisplay);
+  if (targets.length === 0) {
+    return <Action icon={Icon.Desktop} title="Move to Display (No Other Display Available)" onAction={loadDisplays} />;
   }
 
   return (
-    <Action.Submenu
+    <ActionPanel.Submenu
       icon={Icon.Desktop}
       title="Move to Display"
       shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
       onOpen={loadDisplays}
     >
-      <Action
-        icon={Icon.Monitor}
-        title="Move to Focused Space"
-        subtitle="Move to the currently active space"
-        onAction={handleMoveToFocusedDisplay(windowId, windowApp)}
-        shortcut={{ modifiers: ["cmd", "shift"], key: "f" }}
-      />
-      <Action.Separator />
-      {displays.map((display) => (
+      {targets.map((display) => (
         <Action
           key={display.index}
-          icon={display.isFocused ? Icon.CheckCircle : Icon.Circle}
-          title={`Display ${display.index}`}
-          subtitle={`${display.dimensions}${display.isFocused ? " (current)" : ""}`}
-          onAction={handleInteractiveMoveToDisplay(windowId, windowApp, display.index)}
+          icon={Icon.Circle}
+          title={`Display ${display.index} (${display.dimensions})`}
+          onAction={handleInteractiveMoveToDisplay(windowId, windowApp, windowTitle, display.index)}
         />
       ))}
-    </Action.Submenu>
+    </ActionPanel.Submenu>
   );
 }
 
 interface MoveToFocusedDisplayActionProps {
   windowId: number;
   windowApp: string;
+  windowTitle: string;
 }
 
 /**
  * Quick action to move window to the currently focused space
  */
-export function MoveToFocusedDisplayAction({ windowId, windowApp }: MoveToFocusedDisplayActionProps) {
+export function MoveToFocusedDisplayAction({ windowId, windowApp, windowTitle }: MoveToFocusedDisplayActionProps) {
   return (
     <Action
       icon={Icon.Monitor}
       title="Move to Focused Space"
-      subtitle="Move to the currently active space"
-      onAction={handleMoveToFocusedDisplay(windowId, windowApp)}
+      onAction={handleMoveToFocusedDisplay(windowId, windowApp, windowTitle)}
       shortcut={{ modifiers: ["cmd", "shift"], key: "f" }}
     />
   );
@@ -263,12 +198,7 @@ export function SpaceManagementActions() {
         onAction={handleCreateSpace()}
         shortcut={{ modifiers: ["cmd", "ctrl"], key: "n" }}
       />
-      <Action
-        icon={Icon.Trash}
-        title="Destroy Current Space"
-        onAction={handleDestroySpace()}
-        shortcut={{ modifiers: ["cmd", "ctrl"], key: "backspace" }}
-      />
+
       <Action
         icon={Icon.ArrowRight}
         title="Focus Next Space"

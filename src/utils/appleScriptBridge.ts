@@ -3,11 +3,12 @@
  * Used for browser tab access and other macOS automation
  */
 
-import { exec } from "child_process";
-import { promisify } from "util";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { ENV } from "../models";
+import { COMMAND_TIMEOUT_MS } from "./command";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /**
  * Execute an AppleScript and return the result
@@ -15,13 +16,13 @@ const execAsync = promisify(exec);
  * @returns The stdout from osascript
  * @throws AppleScriptError on execution failure
  */
-export async function runAppleScript(script: string): Promise<string> {
+export async function runAppleScript(script: string, args: string[] = []): Promise<string> {
   try {
-    // Use -ss flag for strict error handling
-    const { stdout, stderr } = await execAsync(`osascript -e '${escapeAppleScript(script)}'`, {
+    const { stdout, stderr } = await execFileAsync("/usr/bin/osascript", ["-e", script, ...args], {
       env: ENV,
-      maxBuffer: 5 * 1024 * 1024, // 5MB buffer for large tab lists
-      timeout: 10000, // 10 second timeout
+      encoding: "utf8",
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: COMMAND_TIMEOUT_MS,
     });
 
     if (stderr?.trim()) {
@@ -45,14 +46,6 @@ export async function runAppleScriptList(script: string): Promise<string[]> {
   // AppleScript returns lists as comma-separated values
   // Handle nested lists and special characters
   return parseAppleScriptList(result);
-}
-
-/**
- * Escape single quotes and other special characters for shell execution
- */
-function escapeAppleScript(script: string): string {
-  // Replace single quotes with escaped version for shell
-  return script.replace(/'/g, "'\"'\"'");
 }
 
 /**

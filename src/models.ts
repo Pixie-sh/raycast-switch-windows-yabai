@@ -1,7 +1,7 @@
-import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import * as os from "node:os";
+import { accessSync, constants, statSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { getPreferenceValues } from "@raycast/api";
+import { COMMAND_ENV } from "./utils/command";
 
 export interface Application {
   name: string;
@@ -32,8 +32,9 @@ export enum SortMethod {
 
 export interface YabaiSpace {
   index: number;
-  windows: YabaiWindow[];
+  windows: number[];
   display: number;
+  "is-native-fullscreen"?: boolean;
 }
 
 export interface YabaiDisplay {
@@ -99,31 +100,44 @@ export interface FocusHistoryEntry {
   timestamp: number;
   /** Yabai window ID */
   windowId: number;
+  /** Stable app/title identity when recorded by the extension. */
+  fingerprint?: string;
 }
 
 interface Preferences {
   yabaiPath?: string;
 }
 
+function isExecutableFile(candidate: string): boolean {
+  try {
+    return statSync(candidate).isFile() && (accessSync(candidate, constants.X_OK), true);
+  } catch {
+    return false;
+  }
+}
+
 function resolveYabaiPath(): string {
   const prefs = getPreferenceValues<Preferences>();
-  if (prefs.yabaiPath && existsSync(prefs.yabaiPath)) {
+  if (prefs.yabaiPath) {
+    if (!isExecutableFile(prefs.yabaiPath)) {
+      throw new Error(`Configured yabai path is not an executable file: ${prefs.yabaiPath}`);
+    }
     return prefs.yabaiPath;
   }
-  if (existsSync("/opt/homebrew/bin/yabai")) return "/opt/homebrew/bin/yabai";
-  if (existsSync("/usr/local/bin/yabai")) return "/usr/local/bin/yabai";
-  return execSync("which yabai").toString().trim();
+
+  const candidates = [
+    "/opt/homebrew/bin/yabai",
+    "/usr/local/bin/yabai",
+    ...(process.env.PATH ?? "")
+      .split(delimiter)
+      .filter(Boolean)
+      .map((directory) => join(directory, "yabai")),
+  ];
+  const detected = candidates.find(isExecutableFile);
+  if (!detected) throw new Error("Could not find an executable yabai binary");
+  return detected;
 }
 
 export const YABAI = resolveYabaiPath();
 
-export const JQ = existsSync("/opt/homebrew/bin/jq")
-  ? "/opt/homebrew/bin/jq"
-  : existsSync("/usr/local/bin/jq")
-    ? "/usr/local/bin/jq"
-    : execSync("which jq").toString().trim();
-
-export const ENV = {
-  USER: os.userInfo().username,
-  HOME: os.userInfo().homedir,
-};
+export const ENV: NodeJS.ProcessEnv = COMMAND_ENV;

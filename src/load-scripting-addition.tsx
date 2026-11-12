@@ -1,16 +1,21 @@
 import { showToast, Toast, closeMainWindow } from "@raycast/api";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { YABAI } from "./models";
+import { ENV, YABAI } from "./models";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export default async function Command() {
   await showToast({ style: Toast.Style.Animated, title: "Loading scripting addition..." });
 
   try {
-    await execAsync(`osascript -e 'do shell script "${YABAI} --load-sa" with administrator privileges'`, {
-      timeout: 30000,
+    const script = `on run argv
+      do shell script ((quoted form of item 1 of argv) & " --load-sa") with administrator privileges
+    end run`;
+    await execFileAsync("/usr/bin/osascript", ["-e", script, YABAI], {
+      env: ENV,
+      encoding: "utf8",
+      timeout: 30_000,
     });
     await showToast({ style: Toast.Style.Success, title: "Scripting addition loaded" });
     await closeMainWindow();

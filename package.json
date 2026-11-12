@@ -52,6 +52,9 @@
     "prettier": "^3.5.3",
     "typescript": "^5.8.2"
   },
+  "overrides": {
+    "esbuild": "0.28.2"
+  },
   "scripts": {
     "build": "ray build",
     "dev": "ray develop",
@@ -59,6 +62,8 @@
     "lint": "ray lint",
     "prepublishOnly": "echo \"\\n\\nIt seems like you are trying to publish the Raycast extension to npm.\\n\\nIf you did intend to publish it to npm, remove the \\`prepublishOnly\\` script and rerun \\`npm publish\\` again.\\nIf you wanted to publish it to the Raycast Store instead, use \\`npm run publish\\` instead.\\n\\n\" && exit 1",
     "publish": "npx @raycast/api@latest publish",
-    "test:search": "node --experimental-strip-types test_search_behavior.mjs"
+    "test": "node --no-warnings --experimental-strip-types --test tests/*.test.ts",
+    "test:search": "node --no-warnings --experimental-strip-types --test tests/searchUtils.test.ts",
+    "typecheck": "tsc --noEmit"
   }
 }
