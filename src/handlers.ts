@@ -168,6 +168,8 @@ export const handleFocusWindow = (
         console.log(`Exception indicates window ${windowId} not found, attempting to launch application ${windowApp}`);
 
         try {
+          // The identity query fails before the normal close, so close here.
+          await closeMainWindow();
           const strategy = await launchOrFocusApplication(windowApp, applications);
           await showToast({
             style: Toast.Style.Success,
@@ -551,6 +553,7 @@ export const handleMoveToDisplaySpace = (windowId: number, windowApp: string, ex
  */
 export function isWindowNotFoundError(error: string): boolean {
   const windowNotFoundIndicators = [
+    "could not locate window with the specified id",
     "could not locate the window with the specified id",
     "window not found",
     "invalid window id",
